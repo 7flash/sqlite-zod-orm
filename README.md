@@ -85,7 +85,7 @@ const rows = db.query(c => {
 
 ## Relationships
 
-Define with `z.lazy()`. The ORM auto-creates FK columns, indexes, and navigation methods.
+Define with `z.lazy()`. The ORM auto-creates FK columns and indexes. Use `.join()` or `db.query()` for cross-table queries.
 
 ```typescript
 interface Author { name: string; posts?: Post[]; }
@@ -102,19 +102,21 @@ const PostSchema: z.ZodType<Post> = z.object({
 });
 ```
 
-**Navigation:**
+**Querying across tables:**
 
 ```typescript
-// belongs-to: child → parent
-const post = db.posts.select().where({ title: 'Hello' }).get();
-const author = post.author();
+// Insert with explicit FK
+const alice = db.authors.insert({ name: 'Alice' });
+db.posts.insert({ title: 'Hello', authorId: alice.id });
 
-// one-to-many: parent → children
-const alice = db.authors.get({ name: 'Alice' });
-const posts = alice.posts.find();
+// Fluent join (auto-infers FK from z.lazy)
+const rows = db.posts.select('title')
+  .join(db.authors, ['name'])
+  .all();
+// → [{ title: 'Hello', authors_name: 'Alice' }]
 
-// insert via relationship (auto-sets FK)
-alice.posts.push({ title: 'New Post' });
+// Or just query the child table by FK
+const alicePosts = db.posts.select().where({ authorId: alice.id }).all();
 ```
 
 ---
@@ -198,13 +200,11 @@ unsub(); // stop listening
 
 ## Examples
 
-Each example is a standalone script focused on one feature area:
+A single comprehensive example covers all features:
 
-| Example | Focus | Run |
-|---|---|---|
-| [`basics.ts`](./examples/basics.ts) | CRUD, queries, operators, validation | `bun examples/basics.ts` |
-| [`relationships.ts`](./examples/relationships.ts) | z.lazy(), navigation, .push() | `bun examples/relationships.ts` |
-| [`queries.ts`](./examples/queries.ts) | All three query approaches | `bun examples/queries.ts` |
+```bash
+bun examples/example.ts
+```
 
 Integration tests:
 
@@ -227,7 +227,7 @@ src/
   ast.ts             — AST compiler for callback-style WHERE
 
 examples/            — standalone runnable scripts
-test/                — unit + integration tests (76 tests)
+test/                — unit + integration tests
 ```
 
 ---
@@ -249,9 +249,6 @@ test/                — unit + integration tests (76 tests)
 | `db.table.select().count()` | Count rows |
 | `db.table.select().subscribe(cb, opts)` | Smart polling |
 | `db.getChangesSince(version, table?)` | Change tracking |
-| `entity.parent()` | Navigate belongs-to |
-| `entity.children.find()` | Navigate one-to-many |
-| `entity.children.push(data)` | Insert via relationship |
 
 ## License
 

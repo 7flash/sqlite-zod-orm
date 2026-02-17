@@ -29,14 +29,6 @@ export type Relationship = {
     foreignKey: string;
 };
 
-export type LazyMethod<T = any, R = any> = {
-    name: string;
-    type: Relationship['type'];
-    fetch: (entity: T) => R;
-    childEntityName?: string;
-    parentEntityName?: string;
-};
-
 // --- Type helpers ---
 
 export type InferSchema<S extends z.ZodType<any>> = z.infer<S>;
@@ -58,17 +50,6 @@ export type UpdateBuilder<T> = {
     where: (conditions: Record<string, any>) => UpdateBuilder<T>;
     /** Execute the update and return the number of rows affected */
     exec: () => number;
-};
-
-export type OneToManyRelationship<S extends z.ZodType<any>> = {
-    insert: (data: EntityData<S>) => AugmentedEntity<S>;
-    get: (conditions: number | Partial<InferSchema<S>>) => AugmentedEntity<S> | null;
-    update: ((id: number, data: Partial<EntityData<S>>) => AugmentedEntity<S> | null) & ((data: Partial<EntityData<S>>) => UpdateBuilder<AugmentedEntity<S>>);
-    upsert: (conditions?: Partial<InferSchema<S>>, data?: Partial<InferSchema<S>>) => AugmentedEntity<S>;
-    delete: (id?: number) => void;
-    subscribe: (event: 'insert' | 'update' | 'delete', callback: (data: AugmentedEntity<S>) => void) => void;
-    unsubscribe: (event: 'insert' | 'update' | 'delete', callback: (data: AugmentedEntity<S>) => void) => void;
-    push: (data: EntityData<S>) => AugmentedEntity<S>;
 };
 
 export type EntityAccessor<S extends z.ZodType<any>> = {

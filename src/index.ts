@@ -7,9 +7,9 @@ export { Database } from './database';
 export type { DatabaseType } from './database';
 
 export type {
-    SchemaMap, DatabaseOptions, Relationship, LazyMethod,
+    SchemaMap, DatabaseOptions, Relationship,
     EntityAccessor, TypedAccessors, AugmentedEntity, UpdateBuilder,
-    OneToManyRelationship, InferSchema, EntityData, IndexDef,
+    InferSchema, EntityData, IndexDef,
 } from './types';
 
 export { z } from 'zod';

@@ -10,7 +10,7 @@ import { z } from 'zod';
 import { QueryBuilder } from './query-builder';
 import { executeProxyQuery, type ProxyQueryResult } from './proxy-query';
 import type {
-    SchemaMap, DatabaseOptions, Relationship, LazyMethod,
+    SchemaMap, DatabaseOptions, Relationship,
     EntityAccessor, TypedAccessors, AugmentedEntity, UpdateBuilder,
 } from './types';
 import { asZodObject } from './types';
@@ -28,7 +28,6 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
     private db: SqliteDatabase;
     private schemas: Schemas;
     private relationships: Relationship[];
-    private lazyMethods: Record<string, LazyMethod[]>;
     private subscriptions: Record<'insert' | 'update' | 'delete', Record<string, ((data: any) => void)[]>>;
     private options: DatabaseOptions;
 
@@ -40,7 +39,6 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
         this.options = options;
         this.subscriptions = { insert: {}, update: {}, delete: {} };
         this.relationships = parseRelationships(schemas);
-        this.lazyMethods = this.buildLazyMethods();
         this.initializeTables();
         this.runMigrations();
         if (options.indexes) this.createIndexes(options.indexes);
@@ -65,90 +63,6 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
             };
             (this as any)[key] = accessor;
         }
-    }
-
-    // ===========================================================================
-    // Relationships
-    // ===========================================================================
-
-    private buildLazyMethods(): Record<string, LazyMethod[]> {
-        const lazyMethods: Record<string, LazyMethod[]> = {};
-
-        for (const rel of this.relationships) {
-            lazyMethods[rel.from] = lazyMethods[rel.from] || [];
-
-            if (rel.type === 'one-to-many') {
-                const belongsToRel = this.relationships.find(r =>
-                    r.type === 'belongs-to' && r.from === rel.to && r.to === rel.from
-                );
-                if (!belongsToRel) throw new Error(`No belongs-to found for one-to-many ${rel.from} → ${rel.to}`);
-                const fk = belongsToRel.foreignKey;
-
-                lazyMethods[rel.from].push({
-                    name: rel.relationshipField,
-                    type: 'one-to-many',
-                    childEntityName: rel.to,
-                    parentEntityName: rel.from,
-                    fetch: (entity) => this.buildChildAccessor(rel.to, fk, entity.id),
-                });
-            } else if (rel.type === 'belongs-to') {
-                // Parent navigation: tree.forest() → Forest
-                lazyMethods[rel.from].push({
-                    name: rel.relationshipField,
-                    type: 'belongs-to',
-                    fetch: (entity) => {
-                        const relatedId = entity[rel.foreignKey];
-                        return () => (relatedId ? this.get(rel.to, { id: relatedId }) : null);
-                    },
-                });
-
-                // Inverse: forest.trees → child accessor
-                const parentRel = this.relationships.find(r =>
-                    r.type === 'one-to-many' && r.from === rel.to && r.to === rel.from
-                );
-                if (!parentRel) throw new Error(`No one-to-many found for inverse ${rel.to} → ${rel.from}`);
-
-                lazyMethods[rel.to] = lazyMethods[rel.to] || [];
-                if (!lazyMethods[rel.to].some(m => m.name === parentRel.relationshipField)) {
-                    const fk = rel.foreignKey;
-                    lazyMethods[rel.to].push({
-                        name: parentRel.relationshipField,
-                        type: 'one-to-many',
-                        childEntityName: rel.from,
-                        parentEntityName: rel.to,
-                        fetch: (entity) => this.buildChildAccessor(rel.from, fk, entity.id),
-                    });
-                }
-            }
-        }
-
-        return lazyMethods;
-    }
-
-    /** Build a child accessor object for one-to-many relationships */
-    private buildChildAccessor(childEntity: string, fk: string, parentId: number) {
-        return {
-            insert: (data: any) => this.insert(childEntity, { ...data, [fk]: parentId }),
-            get: (conditions: any) => {
-                const q = typeof conditions === 'number' ? { id: conditions } : conditions;
-                return this.get(childEntity, { ...q, [fk]: parentId });
-            },
-            findOne: (conditions: any) => this.findOne(childEntity, { ...conditions, [fk]: parentId }),
-            find: (conditions: any = {}) => this.find(childEntity, { ...conditions, [fk]: parentId }),
-            update: (id: number, data: any) => this.update(childEntity, id, data),
-            upsert: (conditions: any = {}, data: any = {}) =>
-                this.upsert(childEntity, { ...data, [fk]: parentId }, { ...conditions, [fk]: parentId }),
-            delete: (id?: number) => {
-                if (id) {
-                    this.delete(childEntity, id);
-                } else {
-                    this.find(childEntity, { [fk]: parentId }).forEach(e => this.delete(childEntity, e.id));
-                }
-            },
-            subscribe: (event: any, callback: any) => this.subscribe(event, childEntity, callback),
-            unsubscribe: (event: any, callback: any) => this.unsubscribe(event, childEntity, callback),
-            push: (data: any) => this.insert(childEntity, { ...data, [fk]: parentId }),
-        };
     }
 
     // ===========================================================================
@@ -309,50 +223,11 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
     }
 
     private find<T extends Record<string, any>>(entityName: string, conditions: Record<string, any> = {}): AugmentedEntity<any>[] {
-        const { $include, ...otherConditions } = conditions;
-        const includeFields: string[] = [];
-        if ($include) {
-            if (typeof $include === 'string') includeFields.push($include);
-            else if (Array.isArray($include)) includeFields.push(...$include);
-        }
-
-        if (includeFields.length === 0) {
-            return this.findSimple(entityName, otherConditions);
-        }
-
-        const belongsToIncludes = includeFields.filter(field => {
-            const rel = this.relationships.find(r => r.from === entityName && r.relationshipField === field);
-            return rel?.type === 'belongs-to';
-        });
-        const oneToManyIncludes = includeFields.filter(field => {
-            const rel = this.relationships.find(r => r.from === entityName && r.relationshipField === field);
-            return rel?.type === 'one-to-many';
-        });
-
-        let entities: any[];
-        let includedDataArray: Record<string, any>[];
-
-        if (belongsToIncludes.length > 0) {
-            const { sql, values, joinedTables } = this.buildJoinQuery(entityName, otherConditions, belongsToIncludes);
-            const rows = this.db.query(sql).all(...values);
-            const result = this.parseJoinResults(rows, entityName, joinedTables);
-            entities = result.entities;
-            includedDataArray = result.includedData;
-        } else {
-            entities = this.findSimple(entityName, otherConditions, true);
-            includedDataArray = entities.map(() => ({}));
-        }
-
-        if (oneToManyIncludes.length > 0) {
-            const oneToManyData = this.loadOneToManyIncludes(entityName, entities, oneToManyIncludes);
-            includedDataArray = includedDataArray.map((d, i) => ({ ...d, ...oneToManyData[i] }));
-        }
-
-        return entities.map((entity, index) => this._attachMethods(entityName, entity, includedDataArray[index]));
+        return this.findSimple(entityName, conditions);
     }
 
     /** Simple query without includes */
-    private findSimple(entityName: string, conditions: Record<string, any>, rawEntities = false): any[] {
+    private findSimple(entityName: string, conditions: Record<string, any>): any[] {
         const { $limit, $offset, $sortBy, ...whereConditions } = conditions;
         const { clause, values } = this.buildWhereClause(whereConditions);
 
@@ -366,8 +241,6 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
 
         const rows = this.db.query(sql).all(...values);
         const entities = rows.map((row: any) => transformFromStorage(row, this.schemas[entityName]!));
-
-        if (rawEntities) return entities;
         return entities.map(entity => this._attachMethods(entityName, entity));
     }
 
@@ -458,35 +331,11 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
     // ===========================================================================
 
     private _attachMethods<T extends Record<string, any>>(
-        entityName: string, entity: T, includedData?: Record<string, any>
+        entityName: string, entity: T
     ): AugmentedEntity<any> {
         const augmented = entity as any;
         augmented.update = (data: any) => this.update(entityName, entity.id, data);
         augmented.delete = () => this.delete(entityName, entity.id);
-
-        // Attach relationship methods
-        for (const methodDef of (this.lazyMethods[entityName] || [])) {
-            if (includedData && includedData[methodDef.name] !== undefined) {
-                if (methodDef.type === 'belongs-to') {
-                    augmented[methodDef.name] = () => includedData[methodDef.name];
-                } else if (methodDef.type === 'one-to-many') {
-                    const fkRel = this.relationships.find(r =>
-                        r.type === 'belongs-to' && r.from === methodDef.childEntityName! && r.to === methodDef.parentEntityName!
-                    );
-                    if (!fkRel) throw new Error(`No belongs-to found for ${methodDef.parentEntityName} → ${methodDef.childEntityName}`);
-                    const accessor = this.buildChildAccessor(methodDef.childEntityName!, fkRel.foreignKey, entity.id);
-                    // Override find() to return included data when no additional conditions
-                    const originalFind = accessor.find;
-                    accessor.find = (conditions: any = {}) => {
-                        if (Object.keys(conditions).length === 0) return includedData[methodDef.name] || [];
-                        return originalFind(conditions);
-                    };
-                    augmented[methodDef.name] = accessor;
-                }
-            } else {
-                augmented[methodDef.name] = methodDef.fetch(entity);
-            }
-        }
 
         // Auto-persist proxy: setting a field auto-updates the DB row
         const storableFieldNames = new Set(getStorableFields(this.schemas[entityName]!).map(f => f.name));
@@ -541,117 +390,6 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
         }
 
         return { clause: parts.length > 0 ? `WHERE ${parts.join(' AND ')}` : '', values };
-    }
-
-    private buildJoinQuery(entityName: string, conditions: Record<string, any>, includeFields: string[]) {
-        const { $limit, $offset, $sortBy, ...whereConditions } = conditions;
-        let sql = `SELECT ${entityName}.*`;
-        const joinedTables: { alias: string; entityName: string; relationship: Relationship }[] = [];
-        const joinClauses: string[] = [];
-
-        for (const includeField of includeFields) {
-            const relationship = this.relationships.find(
-                rel => rel.from === entityName && rel.relationshipField === includeField && rel.type === 'belongs-to'
-            );
-            if (relationship) {
-                const alias = `${includeField}_tbl`;
-                joinedTables.push({ alias, entityName: relationship.to, relationship });
-                const joinedFields = ['id', ...getStorableFields(this.schemas[relationship.to]!).map(f => f.name)];
-                sql += `, ${joinedFields.map(f => `${alias}.${f} AS ${alias}_${f}`).join(', ')}`;
-                joinClauses.push(`LEFT JOIN ${relationship.to} ${alias} ON ${entityName}.${relationship.foreignKey} = ${alias}.id`);
-            }
-        }
-
-        sql += ` FROM ${entityName}`;
-        if (joinClauses.length > 0) sql += ` ${joinClauses.join(' ')}`;
-
-        const { clause, values } = this.buildWhereClause(whereConditions, entityName);
-        if (clause) sql += ` ${clause}`;
-        if ($sortBy) {
-            const [field, dir = 'ASC'] = ($sortBy as string).split(':');
-            sql += ` ORDER BY ${entityName}.${field} ${dir.toUpperCase() === 'DESC' ? 'DESC' : 'ASC'}`;
-        }
-        if ($limit) sql += ` LIMIT ${$limit}`;
-        if ($offset) sql += ` OFFSET ${$offset}`;
-
-        return { sql, values, joinedTables };
-    }
-
-    private parseJoinResults(rows: any[], entityName: string, joinedTables: { alias: string; entityName: string; relationship: Relationship }[]) {
-        const entities: any[] = [];
-        const includedData: Record<string, any>[] = [];
-
-        for (const row of rows) {
-            const mainFields = ['id', ...getStorableFields(this.schemas[entityName]!).map(f => f.name)];
-            const mainEntity: Record<string, any> = {};
-            for (const field of mainFields) {
-                if (row[field] !== undefined) mainEntity[field] = row[field];
-            }
-
-            // Add FK columns that aren't in the schema fields
-            const belongsToRels = this.relationships.filter(r => r.type === 'belongs-to' && r.from === entityName);
-            for (const rel of belongsToRels) {
-                if (row[rel.foreignKey] !== undefined) mainEntity[rel.foreignKey] = row[rel.foreignKey];
-            }
-
-            const included: Record<string, any> = {};
-            for (const { alias, entityName: joinedName, relationship } of joinedTables) {
-                const joinedFields = ['id', ...getStorableFields(this.schemas[joinedName]!).map(f => f.name)];
-                const joinedEntity: Record<string, any> = {};
-                let hasData = false;
-                for (const field of joinedFields) {
-                    const val = row[`${alias}_${field}`];
-                    if (val !== undefined && val !== null) { joinedEntity[field] = val; hasData = true; }
-                }
-                if (hasData) {
-                    included[relationship.relationshipField] = this._attachMethods(
-                        joinedName, transformFromStorage(joinedEntity, this.schemas[joinedName]!)
-                    );
-                }
-            }
-
-            entities.push(transformFromStorage(mainEntity, this.schemas[entityName]!));
-            includedData.push(included);
-        }
-
-        return { entities, includedData };
-    }
-
-    private loadOneToManyIncludes(entityName: string, entities: any[], includeFields: string[]): Record<string, any>[] {
-        const result: Record<string, any>[] = entities.map(() => ({}));
-
-        for (const includeField of includeFields) {
-            const relationship = this.relationships.find(
-                rel => rel.from === entityName && rel.relationshipField === includeField && rel.type === 'one-to-many'
-            );
-            if (!relationship) continue;
-
-            const entityIds = entities.map(e => e.id);
-            if (entityIds.length === 0) continue;
-
-            const fkRel = this.relationships.find(r =>
-                r.type === 'belongs-to' && r.from === relationship.to && r.to === relationship.from
-            );
-            if (!fkRel) throw new Error(`No belongs-to for one-to-many ${relationship.from} → ${relationship.to}`);
-
-            const sql = `SELECT * FROM ${relationship.to} WHERE ${fkRel.foreignKey} IN (${entityIds.map(() => '?').join(', ')})`;
-            const rows = this.db.query(sql).all(...entityIds);
-
-            const byParent: Record<number, any[]> = {};
-            for (const row of rows) {
-                const parentId = (row as any)[fkRel.foreignKey];
-                if (!byParent[parentId]) byParent[parentId] = [];
-                byParent[parentId].push(this._attachMethods(
-                    relationship.to, transformFromStorage(row as any, this.schemas[relationship.to]!)
-                ));
-            }
-
-            entities.forEach((entity, i) => {
-                result[i][includeField] = byParent[entity.id] || [];
-            });
-        }
-
-        return result;
     }
 
     // ===========================================================================

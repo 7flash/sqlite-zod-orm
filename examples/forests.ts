@@ -7,7 +7,7 @@
  *  - SQL-like db.query(c => {...}) proxy callback
  *  - Computed fields, defaults, indexes
  *
- *   bun test examples/forests.test.ts
+ *   bun test test/integration.test.ts
  */
 
 import { Database, z } from '../src/index';

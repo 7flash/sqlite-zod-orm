@@ -1,0 +1,245 @@
+/**
+ * example.ts — Complete sqlite-zod-orm demo
+ *
+ * Demonstrates all core features in a single runnable file:
+ *  - Schema definition with Zod validation & defaults
+ *  - Insert, get, update, delete (CRUD)
+ *  - Fluent select().where().orderBy() queries
+ *  - Query operators ($gt, $in, $ne, $lt, $gte)
+ *  - z.lazy() relationships with auto FK columns
+ *  - Fluent .join() for cross-table queries
+ *  - Proxy callback db.query() for SQL-like JOINs
+ *  - Upsert, transactions, pagination
+ *  - Schema validation at runtime
+ *
+ * Run: bun examples/example.ts
+ */
+import { Database, z } from '../src/index';
+
+// =============================================================================
+// 1. SCHEMAS
+// =============================================================================
+
+const UserSchema = z.object({
+    name: z.string().min(1),
+    email: z.string().email(),
+    role: z.string().default('member'),
+    score: z.number().int().default(0),
+});
+
+interface Author { name: string; country: string; books?: Book[]; }
+interface Book { title: string; year: number; pages: number; author?: Author; }
+
+const AuthorSchema: z.ZodType<Author> = z.object({
+    name: z.string(),
+    country: z.string(),
+    books: z.lazy(() => z.array(BookSchema)).optional(),
+});
+
+const BookSchema: z.ZodType<Book> = z.object({
+    title: z.string(),
+    year: z.number(),
+    pages: z.number(),
+    author: z.lazy(() => AuthorSchema).optional(),
+});
+
+// =============================================================================
+// 2. DATABASE — schemas + indexes
+// =============================================================================
+
+const db = new Database(':memory:', {
+    users: UserSchema,
+    authors: AuthorSchema,
+    books: BookSchema,
+}, {
+    indexes: {
+        users: ['email', ['name', 'role']],
+        books: ['authorId', 'year'],
+    },
+});
+
+// =============================================================================
+// 3. CRUD — Insert, Get, Update, Delete
+// =============================================================================
+
+console.log('── 1. CRUD ──');
+
+// Insert (defaults fill in automatically)
+const alice = db.users.insert({ name: 'Alice', email: 'alice@example.com', role: 'admin', score: 100 });
+const bob = db.users.insert({ name: 'Bob', email: 'bob@example.com', score: 75 });
+const carol = db.users.insert({ name: 'Carol', email: 'carol@example.com', score: 42 });
+
+console.log('Inserted:', alice.name, bob.name, carol.name);
+console.log('Bob default role:', bob.role); // → 'member'
+
+// Get by ID or by filter
+const found = db.users.get(1);
+console.log('Get by ID:', found?.name); // → 'Alice'
+
+const admin = db.users.get({ role: 'admin' });
+console.log('Get by filter:', admin?.name); // → 'Alice'
+
+// Update by ID
+alice.update({ score: 200 });
+console.log('Updated score:', db.users.get(1)?.score); // → 200
+
+// Fluent update with WHERE
+const affected = db.users.update({ score: 0 }).where({ role: 'member' }).exec();
+console.log('Reset member scores:', affected, 'rows');
+
+// Delete
+db.users.delete(carol.id);
+console.log('After delete, total:', db.users.select().count());
+
+// =============================================================================
+// 4. FLUENT QUERIES — select().where().orderBy()
+// =============================================================================
+
+console.log('\n── 2. Fluent Queries ──');
+
+const topScorers = db.users.select()
+    .where({ score: { $gt: 0 } })
+    .orderBy('score', 'desc')
+    .all();
+console.log('Top scorers:', topScorers.map(u => `${u.name}: ${u.score}`));
+
+const nonAdmins = db.users.select()
+    .where({ role: { $ne: 'admin' } })
+    .all();
+console.log('Non-admins:', nonAdmins.map(u => u.name));
+
+const specific = db.users.select()
+    .where({ name: { $in: ['Alice', 'Bob'] } })
+    .all();
+console.log('In-query:', specific.map(u => u.name));
+
+const total = db.users.select().count();
+console.log('Total users:', total);
+
+const first = db.users.select().orderBy('name', 'asc').get();
+console.log('First alphabetically:', first?.name);
+
+// =============================================================================
+// 5. RELATIONSHIPS — z.lazy() auto FK + join queries
+// =============================================================================
+
+console.log('\n── 3. Relationships (z.lazy → auto FK) ──');
+
+// Insert authors
+const tolstoy = db.authors.insert({ name: 'Leo Tolstoy', country: 'Russia' });
+const dostoevsky = db.authors.insert({ name: 'Fyodor Dostoevsky', country: 'Russia' });
+const kafka = db.authors.insert({ name: 'Franz Kafka', country: 'Czech Republic' });
+
+// Insert books with FK (authorId auto-created from z.lazy)
+db.books.insert({ title: 'War and Peace', year: 1869, pages: 1225, authorId: tolstoy.id } as any);
+db.books.insert({ title: 'Anna Karenina', year: 1878, pages: 864, authorId: tolstoy.id } as any);
+db.books.insert({ title: 'Crime and Punishment', year: 1866, pages: 671, authorId: dostoevsky.id } as any);
+db.books.insert({ title: 'The Brothers Karamazov', year: 1880, pages: 796, authorId: dostoevsky.id } as any);
+db.books.insert({ title: 'The Trial', year: 1925, pages: 255, authorId: kafka.id } as any);
+
+console.log(`Seeded ${db.authors.select().count()} authors, ${db.books.select().count()} books`);
+
+// =============================================================================
+// 6. FLUENT JOIN — select().join() with auto FK inference
+// =============================================================================
+
+console.log('\n── 4. Fluent Join ──');
+
+const booksWithAuthors = db.books.select('title', 'year', 'pages')
+    .join(db.authors, ['name', 'country'])
+    .orderBy('year', 'asc')
+    .all();
+
+console.log('All books with authors:');
+for (const row of booksWithAuthors) {
+    console.log(`  ${(row as any).year} - ${(row as any).title} by ${(row as any).authors_name} (${(row as any).authors_country})`);
+}
+
+// Filter joined results
+const longBooks = db.books.select('title', 'pages')
+    .join(db.authors, ['name'])
+    .where({ pages: { $gt: 700 } })
+    .orderBy('pages', 'desc')
+    .all();
+console.log('Long books:', longBooks.map((b: any) => `${b.title} (${b.pages}p) by ${b.authors_name}`));
+
+// Pagination
+const page1 = db.books.select('title')
+    .join(db.authors, ['name'])
+    .orderBy('year', 'asc')
+    .limit(2)
+    .all();
+console.log('Page 1 (2 books):', page1.map((b: any) => b.title));
+
+// =============================================================================
+// 7. PROXY CALLBACK — db.query() for SQL-like JOINs
+// =============================================================================
+
+console.log('\n── 5. Proxy Callback (SQL-like) ──');
+
+const russianBooks = db.query((c: any) => {
+    const { authors: a, books: b } = c;
+    return {
+        select: { author: a.name, book: b.title, year: b.year },
+        join: [[b.authorId, a.id]],
+        where: { [a.country]: 'Russia' },
+        orderBy: { [b.year]: 'asc' },
+    };
+});
+
+console.log('Russian books (proxy query):');
+for (const row of russianBooks) {
+    console.log(`  ${(row as any).year} - ${(row as any).book} by ${(row as any).author}`);
+}
+
+const latest = db.query((c: any) => {
+    const { books: b, authors: a } = c;
+    return {
+        select: { title: b.title, author: a.name, year: b.year },
+        join: [[b.authorId, a.id]],
+        orderBy: { [b.year]: 'desc' },
+        limit: 2,
+    };
+});
+console.log('Latest 2 books:', latest.map((r: any) => `${r.title} (${r.year})`));
+
+// =============================================================================
+// 8. UPSERT & TRANSACTIONS
+// =============================================================================
+
+console.log('\n── 6. Upsert & Transactions ──');
+
+// Upsert: update if exists, insert if not
+db.users.upsert({ email: 'bob@example.com' }, { name: 'Bob', email: 'bob@example.com', role: 'moderator', score: 80 });
+console.log('Bob after upsert:', db.users.get({ email: 'bob@example.com' })?.role); // → 'moderator'
+
+db.users.upsert({ email: 'dave@example.com' }, { name: 'Dave', email: 'dave@example.com' });
+console.log('Dave inserted via upsert:', db.users.get({ email: 'dave@example.com' })?.name);
+
+// Transaction (atomic)
+db.transaction(() => {
+    db.users.insert({ name: 'Eve', email: 'eve@example.com', role: 'member', score: 50 });
+    db.users.update({ score: 999 }).where({ name: 'Alice' }).exec();
+});
+console.log('After transaction — Alice score:', db.users.get({ name: 'Alice' })?.score);
+console.log('After transaction — Eve exists:', !!db.users.get({ name: 'Eve' }));
+
+// =============================================================================
+// 9. SCHEMA VALIDATION — Zod enforces at runtime
+// =============================================================================
+
+console.log('\n── 7. Schema Validation ──');
+
+try {
+    db.users.insert({ name: '', email: 'bad', role: 'test', score: 0 });
+} catch (e: any) {
+    console.log('Validation error:', e.issues?.[0]?.message ?? e.message);
+}
+
+try {
+    db.authors.insert({ name: 123 } as any);
+} catch (e: any) {
+    console.log('Type error caught:', e.issues?.[0]?.message ?? e.message);
+}
+
+console.log('\n✅ example.ts complete');
