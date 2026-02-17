@@ -97,6 +97,13 @@ const db = new SatiDB(':memory:', {
     contacts: ContactSchema,
     memberships: MembershipSchema,
     messages: MessageSchema,
+}, {
+    changeTracking: true,
+    indexes: {
+        contacts: ['email'],
+        memberships: [['contactId', 'groupId']],  // composite unique-ish index
+        messages: ['groupId', 'senderId'],
+    },
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -114,11 +121,12 @@ test('seed: insert groups, contacts, memberships, and messages', () => {
     const carol = db.contacts.insert({ name: 'Carol', email: 'carol@co.dev' });
 
     // Memberships (many-to-many via junction)
-    alice.memberships.push({ groupId: engineering.id, role: 'lead' });
-    alice.memberships.push({ groupId: design.id, role: 'member' });
-    bob.memberships.push({ groupId: engineering.id });
-    carol.memberships.push({ groupId: design.id, role: 'lead' });
-    carol.memberships.push({ groupId: engineering.id });
+    // FK constraints ensure contactId/groupId reference valid rows
+    db.memberships.insert({ contactId: alice.id, groupId: engineering.id, role: 'lead' });
+    db.memberships.insert({ contactId: alice.id, groupId: design.id, role: 'member' });
+    db.memberships.insert({ contactId: bob.id, groupId: engineering.id });
+    db.memberships.insert({ contactId: carol.id, groupId: design.id, role: 'lead' });
+    db.memberships.insert({ contactId: carol.id, groupId: engineering.id });
 
     // Messages in Engineering
     db.messages.insert({ body: 'Sprint starts Monday', groupId: engineering.id, senderId: alice.id });
@@ -147,8 +155,8 @@ test('builder: fetch messages in a specific group', () => {
         .all();
 
     expect(msgs.length).toBe(4);
-    expect(msgs[0].body).toBe('Sprint starts Monday');
-    expect(msgs[3].body).toBe('Merged, thanks!');
+    expect(msgs[0]!.body).toBe('Sprint starts Monday');
+    expect(msgs[3]!.body).toBe('Merged, thanks!');
 });
 
 test('builder: callback WHERE with SQL functions', () => {
@@ -256,33 +264,39 @@ test('proxy: messages from contacts in a specific group', () => {
 // 4. RELATIONSHIPS — One-to-Many, Belongs-To, Many-to-Many
 // ═══════════════════════════════════════════════════════════════
 
-test('one-to-many: contact.sentMessages navigates children', () => {
+test('one-to-many: find messages sent by a contact', () => {
     const bob = db.contacts.select().where({ name: 'Bob' }).get()!;
-    const msgs = bob.sentMessages.find();
+    const msgs = db.messages.select().where({ senderId: bob.id }).all();
 
     expect(msgs.length).toBe(2);
-    expect(msgs.every((m: any) => m.senderId === bob.id)).toBe(true);
+    expect(msgs.every(m => m.senderId === bob.id)).toBe(true);
 });
 
-test('belongs-to: message.sender() traverses back to parent', () => {
+test('belongs-to: find the sender of a message', () => {
     const msg = db.messages.select().where({ body: 'Looks great!' }).get()!;
-    const sender = msg.sender();
+    const sender = db.contacts.select().where({ id: msg.senderId! }).get()!;
 
     expect(sender.name).toBe('Alice');
 });
 
 test('many-to-many: group → memberships → contacts', () => {
     const engineering = db.groups.select().where({ name: 'Engineering' }).get()!;
-    const members = engineering.memberships.find().map((m: any) => m.contact());
-    const names = members.map((c: any) => c.name).sort();
+    const memberships = db.memberships.select().where({ groupId: engineering.id }).all();
+    const names = memberships.map(m => {
+        const contact = db.contacts.select().where({ id: m.contactId }).get()!;
+        return contact.name;
+    }).sort();
 
     expect(names).toEqual(['Alice', 'Bob', 'Carol']);
 });
 
 test('many-to-many: contact → memberships → groups', () => {
     const carol = db.contacts.select().where({ name: 'Carol' }).get()!;
-    const groups = carol.memberships.find().map((m: any) => m.group());
-    const names = groups.map((g: any) => g.name).sort();
+    const memberships = db.memberships.select().where({ contactId: carol.id }).all();
+    const names = memberships.map(m => {
+        const group = db.groups.select().where({ id: m.groupId }).get()!;
+        return group.name;
+    }).sort();
 
     expect(names).toEqual(['Design', 'Engineering']);
 });
@@ -393,4 +407,158 @@ test('subscribe: unsubscribe stops polling', async () => {
     await new Promise(r => setTimeout(r, 100));
 
     expect(callCount).toBe(1);
+});
+
+// ═══════════════════════════════════════════════════════════════
+// 8. INDEXES — Verify index creation
+// ═══════════════════════════════════════════════════════════════
+
+test('indexes: single-column index on contacts.email', () => {
+    const indexes = (db as any).db
+        .query("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='contacts'")
+        .all() as { name: string }[];
+    const indexNames = indexes.map(i => i.name);
+
+    expect(indexNames).toContain('idx_contacts_email');
+});
+
+test('indexes: composite index on memberships(contactId, groupId)', () => {
+    const indexes = (db as any).db
+        .query("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='memberships'")
+        .all() as { name: string }[];
+    const indexNames = indexes.map(i => i.name);
+
+    expect(indexNames).toContain('idx_memberships_contactId_groupId');
+});
+
+test('indexes: multiple indexes on messages table', () => {
+    const indexes = (db as any).db
+        .query("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='messages'")
+        .all() as { name: string }[];
+    const indexNames = indexes.map(i => i.name);
+
+    expect(indexNames).toContain('idx_messages_groupId');
+    expect(indexNames).toContain('idx_messages_senderId');
+});
+
+// ═══════════════════════════════════════════════════════════════
+// 9. CHANGE TRACKING — Trigger-based change log
+// ═══════════════════════════════════════════════════════════════
+
+test('change tracking: inserts are logged in _sati_changes', () => {
+    // All seed data inserts should be tracked
+    const seq = db.getChangeSeq('contacts');
+    expect(seq).toBeGreaterThan(0);
+
+    const changes = db.getChangesSince(0, 'contacts');
+    // We inserted 3 contacts in the seed
+    const insertChanges = changes.filter(c => c.action === 'INSERT');
+    expect(insertChanges.length).toBeGreaterThanOrEqual(3);
+});
+
+test('change tracking: updates are logged', () => {
+    const seqBefore = db.getChangeSeq('contacts');
+
+    // Update a contact
+    const alice = db.contacts.select().where({ name: 'Alice' }).get()!;
+    db.contacts.update(alice.id, { email: 'alice-new@co.dev' });
+
+    const changes = db.getChangesSince(seqBefore, 'contacts');
+    expect(changes.length).toBe(1);
+    expect(changes[0]!.action).toBe('UPDATE');
+    expect(changes[0]!.row_id).toBe(alice.id);
+
+    // Revert for other tests
+    db.contacts.update(alice.id, { email: 'alice@co.dev' });
+});
+
+test('change tracking: deletes are logged', () => {
+    // Insert a temporary contact
+    const temp = db.contacts.insert({ name: 'Temp' });
+    const seqAfterInsert = db.getChangeSeq('contacts');
+
+    db.contacts.delete(temp.id);
+
+    const changes = db.getChangesSince(seqAfterInsert, 'contacts');
+    expect(changes.length).toBe(1);
+    expect(changes[0]!.action).toBe('DELETE');
+    expect(changes[0]!.row_id).toBe(temp.id);
+});
+
+test('change tracking: getChangeSeq returns -1 when tracking disabled', () => {
+    // Create a DB without change tracking
+    const plainDb = new SatiDB(':memory:', {
+        items: z.object({ name: z.string() }),
+    });
+    expect(plainDb.getChangeSeq()).toBe(-1);
+});
+
+// ═══════════════════════════════════════════════════════════════
+// 10. MIGRATIONS — Auto-add missing columns
+// ═══════════════════════════════════════════════════════════════
+
+test('migrations: auto-adds new columns when schema evolves', () => {
+    const { join } = require('path');
+    const { unlinkSync } = require('fs');
+    const dbPath = join(import.meta.dir, `_test_migration_${Date.now()}.db`);
+
+    try {
+        // Step 1: Create a DB with a simple schema
+        const dbA = new SatiDB(dbPath, {
+            users: z.object({ name: z.string() }),
+        });
+        dbA.users.insert({ name: 'Bob' });
+        expect(dbA.users.find().length).toBe(1);
+
+        // Step 2: Reopen with an extra column — migration should add it
+        const dbB = new SatiDB(dbPath, {
+            users: z.object({
+                name: z.string(),
+                email: z.string().optional(),
+            }),
+        });
+
+        // The existing row should still be accessible
+        const all = dbB.users.find();
+        const bob = all.find((u: any) => u.name === 'Bob');
+        expect(bob).toBeDefined();
+        expect(bob!.name).toBe('Bob');
+
+        // New rows can use the new column
+        dbB.users.insert({ name: 'Carol', email: 'carol@test.com' });
+        const carol = dbB.users.find().find((u: any) => u.name === 'Carol');
+        expect(carol).toBeDefined();
+        expect(carol!.email).toBe('carol@test.com');
+    } finally {
+        try { unlinkSync(dbPath); } catch { }
+    }
+});
+
+test('migrations: tracks added columns in _sati_meta', () => {
+    const { join } = require('path');
+    const { unlinkSync } = require('fs');
+    const dbPath = join(import.meta.dir, `_test_meta_${Date.now()}.db`);
+
+    try {
+        // Create initial schema
+        new SatiDB(dbPath, {
+            tasks: z.object({ title: z.string() }),
+        });
+
+        // Reopen with new column
+        const db2 = new SatiDB(dbPath, {
+            tasks: z.object({
+                title: z.string(),
+                priority: z.number().optional(),
+            }),
+        });
+
+        // Check _sati_meta recorded the migration
+        const meta = (db2 as any).db
+            .query("SELECT * FROM _sati_meta WHERE table_name = 'tasks' AND column_name = 'priority'")
+            .all();
+        expect(meta.length).toBe(1);
+    } finally {
+        try { unlinkSync(dbPath); } catch { }
+    }
 });

@@ -10,6 +10,17 @@ type SchemaMap = Record<string, z.ZodType<any>>;
 /** Internal cast: all schemas are z.object() at runtime, but may be typed as z.ZodType<T> */
 const asZodObject = (s: z.ZodType<any>) => s as unknown as z.ZodObject<any>;
 
+/** Index definition: single column or composite columns */
+type IndexDef = string | string[];
+
+/** Options for SatiDB constructor */
+type SatiDBOptions = {
+  /** Enable trigger-based change tracking for efficient subscribe polling */
+  changeTracking?: boolean;
+  /** Index definitions per table: { tableName: ['col1', ['col2', 'col3']] } */
+  indexes?: Record<string, IndexDef[]>;
+};
+
 type Relationship = {
   type: 'belongs-to' | 'one-to-many';
   from: string;
@@ -79,16 +90,21 @@ class _SatiDB<Schemas extends SchemaMap> extends EventEmitter {
   private relationships: Relationship[];
   private lazyMethods: Record<string, LazyMethod[]>;
   private subscriptions: Record<'insert' | 'update' | 'delete', Record<string, ((data: any) => void)[]>>;
+  private options: SatiDBOptions;
 
-  constructor(dbFile: string, schemas: Schemas) {
+  constructor(dbFile: string, schemas: Schemas, options: SatiDBOptions = {}) {
     super();
     this.db = new Database(dbFile);
     this.db.run('PRAGMA foreign_keys = ON');
     this.schemas = schemas;
+    this.options = options;
     this.subscriptions = { insert: {}, update: {}, delete: {} };
     this.relationships = this.parseRelationships(schemas);
     this.lazyMethods = this.buildLazyMethods();
     this.initializeTables();
+    this.runMigrations();
+    if (options.indexes) this.createIndexes(options.indexes);
+    if (options.changeTracking) this.setupChangeTracking();
 
     Object.keys(schemas).forEach(entityName => {
       const key = entityName as keyof Schemas;
@@ -274,6 +290,130 @@ class _SatiDB<Schemas extends SchemaMap> extends EventEmitter {
       const createTableSql = `CREATE TABLE IF NOT EXISTS ${entityName} (id INTEGER PRIMARY KEY AUTOINCREMENT, ${columnDefs.join(', ')}${constraints.length > 0 ? ', ' + constraints.join(', ') : ''})`;
       this.db.run(createTableSql);
     }
+  }
+
+  // ================== Migrations ==================
+
+  private runMigrations(): void {
+    // Create meta table to track schema state
+    this.db.run(`CREATE TABLE IF NOT EXISTS _sati_meta (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      table_name TEXT NOT NULL,
+      column_name TEXT NOT NULL,
+      added_at TEXT DEFAULT (datetime('now')),
+      UNIQUE(table_name, column_name)
+    )`);
+
+    for (const [entityName, schema] of Object.entries(this.schemas)) {
+      // Get existing columns from SQLite
+      const existingCols = new Set(
+        (this.db.query(`PRAGMA table_info(${entityName})`).all() as any[])
+          .map(c => c.name)
+      );
+
+      // Get expected columns from schema
+      const storableFields = this.getStorableFields(schema);
+      const belongsToRels = this.relationships.filter(
+        rel => rel.type === 'belongs-to' && rel.from === entityName
+      );
+      const fkColumns = belongsToRels.map(rel => rel.foreignKey);
+
+      // Add missing columns
+      for (const field of storableFields) {
+        if (!existingCols.has(field.name)) {
+          const sqlType = this.zodTypeToSqlType(field.type);
+          this.db.run(`ALTER TABLE ${entityName} ADD COLUMN ${field.name} ${sqlType}`);
+          this.db.query(`INSERT OR IGNORE INTO _sati_meta (table_name, column_name) VALUES (?, ?)`).run(entityName, field.name);
+        }
+      }
+      for (const fk of fkColumns) {
+        if (!existingCols.has(fk)) {
+          this.db.run(`ALTER TABLE ${entityName} ADD COLUMN ${fk} INTEGER`);
+          this.db.query(`INSERT OR IGNORE INTO _sati_meta (table_name, column_name) VALUES (?, ?)`).run(entityName, fk);
+        }
+      }
+    }
+  }
+
+  // ================== Indexes ==================
+
+  private createIndexes(indexDefs: Record<string, IndexDef[]>): void {
+    for (const [tableName, indexes] of Object.entries(indexDefs)) {
+      if (!this.schemas[tableName]) {
+        throw new Error(`Cannot create index on unknown table '${tableName}'`);
+      }
+      for (const indexDef of indexes) {
+        const columns = Array.isArray(indexDef) ? indexDef : [indexDef];
+        const indexName = `idx_${tableName}_${columns.join('_')}`;
+        const columnList = columns.join(', ');
+        this.db.run(`CREATE INDEX IF NOT EXISTS ${indexName} ON ${tableName} (${columnList})`);
+      }
+    }
+  }
+
+  // ================== Change Tracking ==================
+
+  private setupChangeTracking(): void {
+    // Create the change-tracking table
+    this.db.run(`CREATE TABLE IF NOT EXISTS _sati_changes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      table_name TEXT NOT NULL,
+      row_id INTEGER NOT NULL,
+      action TEXT NOT NULL CHECK(action IN ('INSERT', 'UPDATE', 'DELETE')),
+      changed_at TEXT DEFAULT (datetime('now'))
+    )`);
+
+    // Create an index for efficient polling
+    this.db.run(`CREATE INDEX IF NOT EXISTS idx_sati_changes_table ON _sati_changes (table_name, id)`);
+
+    // Create triggers for each entity table
+    for (const entityName of Object.keys(this.schemas)) {
+      // INSERT trigger
+      this.db.run(`CREATE TRIGGER IF NOT EXISTS _sati_trg_${entityName}_insert
+        AFTER INSERT ON ${entityName}
+        BEGIN
+          INSERT INTO _sati_changes (table_name, row_id, action) VALUES ('${entityName}', NEW.id, 'INSERT');
+        END`);
+
+      // UPDATE trigger
+      this.db.run(`CREATE TRIGGER IF NOT EXISTS _sati_trg_${entityName}_update
+        AFTER UPDATE ON ${entityName}
+        BEGIN
+          INSERT INTO _sati_changes (table_name, row_id, action) VALUES ('${entityName}', NEW.id, 'UPDATE');
+        END`);
+
+      // DELETE trigger
+      this.db.run(`CREATE TRIGGER IF NOT EXISTS _sati_trg_${entityName}_delete
+        AFTER DELETE ON ${entityName}
+        BEGIN
+          INSERT INTO _sati_changes (table_name, row_id, action) VALUES ('${entityName}', OLD.id, 'DELETE');
+        END`);
+    }
+  }
+
+  /**
+   * Get the latest change sequence number for a table.
+   * Used by QueryBuilder.subscribe to efficiently detect changes.
+   */
+  public getChangeSeq(tableName?: string): number {
+    if (!this.options.changeTracking) return -1;
+    const sql = tableName
+      ? `SELECT MAX(id) as seq FROM _sati_changes WHERE table_name = ?`
+      : `SELECT MAX(id) as seq FROM _sati_changes`;
+    const params = tableName ? [tableName] : [];
+    const row = this.db.query(sql).get(...params) as any;
+    return row?.seq ?? 0;
+  }
+
+  /**
+   * Get changes since a given sequence number.
+   */
+  public getChangesSince(sinceSeq: number, tableName?: string): { id: number; table_name: string; row_id: number; action: string; changed_at: string }[] {
+    const sql = tableName
+      ? `SELECT * FROM _sati_changes WHERE id > ? AND table_name = ? ORDER BY id ASC`
+      : `SELECT * FROM _sati_changes WHERE id > ? ORDER BY id ASC`;
+    const params = tableName ? [sinceSeq, tableName] : [sinceSeq];
+    return this.db.query(sql).all(...params) as any[];
   }
 
   private isRelationshipField(schema: z.ZodType<any>, key: string): boolean {
@@ -941,10 +1081,11 @@ class _SatiDB<Schemas extends SchemaMap> extends EventEmitter {
 }
 
 // Re-export the class with proper typing so `new SatiDB(...)` returns entity accessors
-const SatiDB = _SatiDB as new <S extends SchemaMap>(dbFile: string, schemas: S) => _SatiDB<S> & TypedAccessors<S>;
+const SatiDB = _SatiDB as unknown as new <S extends SchemaMap>(dbFile: string, schemas: S, options?: SatiDBOptions) => _SatiDB<S> & TypedAccessors<S>;
 type SatiDB<S extends SchemaMap> = _SatiDB<S> & TypedAccessors<S>;
 
 export type DB<S extends SchemaMap> = SatiDB<S>;
+export type { SatiDBOptions };
 export { SatiDB, z };
 export { QueryBuilder } from './query-builder';
 export { ColumnNode, type ProxyQueryResult } from './proxy-query';
