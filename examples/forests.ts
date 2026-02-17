@@ -10,7 +10,7 @@
  *   bun test examples/forests.test.ts
  */
 
-import { Database, z } from '../src/satidb';
+import { Database, z } from '../src/index';
 
 // =============================================================================
 // SCHEMAS

@@ -1,5 +1,5 @@
 /**
- * forests.test.ts — sqlite-zod-orm integration tests
+ * integration.test.ts — sqlite-zod-orm integration tests
  *
  * Covers all three query approaches:
  *   1. Fluent builder:   db.trees.select().where({...}).all()
@@ -8,11 +8,11 @@
  *
  * Plus: relationships, mutations, schema validation, computed fields.
  *
- *   bun test examples/forests.test.ts
+ *   bun test test/integration.test.ts
  */
 
 import { describe, test, expect } from 'bun:test';
-import { createForestsDb } from './forests';
+import { createForestsDb } from '../examples/forests';
 
 const { db, displayName } = createForestsDb();
 
@@ -199,7 +199,6 @@ describe('Forests — Proxy query (SQL-like JOINs)', () => {
             };
         });
 
-        // All alive trees should have forest names
         expect(rows.every((r: any) => typeof r.forest === 'string')).toBe(true);
         expect(rows.every((r: any) => r.alive === 1)).toBe(true);
     });
@@ -220,18 +219,16 @@ describe('Forests — Proxy query (SQL-like JOINs)', () => {
 
         expect(byForest['Sherwood']).toBe(3);
         expect(byForest['Amazon']).toBe(3);
-        expect(byForest['Black Forest']).toBe(3);  // 2 original + 1 added in relationship test
+        expect(byForest['Black Forest']).toBe(3);
     });
 });
 
 // =============================================================================
 // 5b. FLUENT JOIN — db.trees.select().join().where().all()
-//     Same power as proxy query, simpler syntax for common joins.
 // =============================================================================
 
 describe('Forests — Fluent join (select().join())', () => {
     test('join trees with forest name + address (auto FK)', () => {
-        // db.forests is the accessor — FK auto-inferred from z.lazy relationship
         const rows = db.trees.select('name', 'planted')
             .join(db.forests, ['name', 'address'])
             .where({ alive: true })
@@ -239,7 +236,6 @@ describe('Forests — Fluent join (select().join())', () => {
             .all();
 
         expect(rows.length).toBeGreaterThan(0);
-        // Joined columns are prefixed: forests_name, forests_address
         expect((rows[0] as any).forests_name).toBeDefined();
         expect((rows[0] as any).forests_address).toBeDefined();
     });
@@ -263,7 +259,6 @@ describe('Forests — Fluent join (select().join())', () => {
             .all();
 
         expect(rows.length).toBe(3);
-        // Most recently planted trees first
         expect((rows[0] as any).planted >= (rows[1] as any).planted).toBe(true);
     });
 
@@ -285,7 +280,7 @@ describe('Forests — Fluent join (select().join())', () => {
 describe('Forests — Mutations', () => {
     test('update tree by ID', () => {
         const elm = db.trees.select().where({ name: 'Dead Elm' }).get()!;
-        db.trees.update(elm.id, { alive: true });  // resurrect!
+        db.trees.update(elm.id, { alive: true });
         const updated = db.trees.get(elm.id)!;
         expect(updated.alive).toBe(true);
     });
@@ -308,7 +303,6 @@ describe('Forests — Mutations', () => {
             { name: 'Brazil Nut', planted: '1800-01-01', alive: true, forestId: amazon.id } as any,
         );
 
-        // Should not duplicate
         const nuts = db.trees.select().where({ name: 'Brazil Nut' }).all();
         expect(nuts.length).toBe(1);
     });
@@ -341,6 +335,6 @@ describe('Forests — Schema validation', () => {
     test('defaults are applied (alive = true)', () => {
         const amazon = db.forests.select().where({ name: 'Amazon' }).get()!;
         const tree = (amazon as any).trees.push({ name: 'Test Sapling', planted: '2025-01-01' });
-        expect(tree.alive).toBe(true);  // default applied by Zod
+        expect(tree.alive).toBe(true);
     });
 });

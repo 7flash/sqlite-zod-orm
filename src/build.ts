@@ -3,21 +3,19 @@ import { EOL } from 'os';
 console.log("Building sqlite-zod-orm...");
 
 const result = await Bun.build({
-  entrypoints: ['./src/satidb.ts'],
+  entrypoints: ['./src/index.ts'],
   outdir: './dist',
-  target: 'bun', // Optimize for the Bun runtime
+  target: 'bun',
   format: 'esm',
-  minify: true, // Minify for smaller file size
+  minify: false,
 });
 
 if (!result.success) {
-  console.error("Build failed");
-  for (const message of result.logs) {
-    console.error(message);
+  console.error("Build failed:");
+  for (const msg of result.logs) {
+    console.error(msg);
   }
   process.exit(1);
 }
 
-const outFile = result.outputs[0].path;
-
-console.log(`Build successful! Executable created at: ${outFile}`);
+console.log(`Build complete → dist/ (${result.outputs.length} file${result.outputs.length > 1 ? 's' : ''})${EOL}`);

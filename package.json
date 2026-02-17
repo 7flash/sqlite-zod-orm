@@ -3,13 +3,13 @@
   "version": "3.1.0",
   "description": "Type-safe SQLite ORM for Bun — Zod schemas, fluent queries, auto relationships, zero SQL",
   "type": "module",
-  "main": "./dist/satidb.js",
-  "module": "./dist/satidb.js",
-  "types": "./src/satidb.ts",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./src/index.ts",
   "exports": {
     ".": {
-      "import": "./dist/satidb.js",
-      "types": "./src/satidb.ts"
+      "import": "./dist/index.js",
+      "types": "./src/index.ts"
     }
   },
   "scripts": {

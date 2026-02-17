@@ -12,24 +12,16 @@ bun add sqlite-zod-orm
 import { Database, z } from 'sqlite-zod-orm';
 
 const db = new Database(':memory:', {
-  forests: z.object({
+  users: z.object({
     name: z.string(),
-    address: z.string(),
-    trees: z.lazy(() => z.array(TreeSchema)).optional(), // one-to-many
-  }),
-  trees: z.object({
-    name: z.string(),
-    planted: z.string(),
-    alive: z.boolean().default(true),
-    forest: z.lazy(() => ForestSchema).optional(),       // belongs-to → auto FK
+    email: z.string().email(),
+    role: z.string().default('member'),
   }),
 });
 
-// Insert
-const sherwood = db.forests.insert({ name: 'Sherwood', address: 'Nottingham, UK' });
-
-// Insert via relationship (auto-sets forestId)
-sherwood.trees.push({ name: 'Major Oak', planted: '1500-01-01' });
+const alice = db.users.insert({ name: 'Alice', email: 'alice@example.com', role: 'admin' });
+const found = db.users.get(1);          // by ID
+const admin = db.users.get({ role: 'admin' }); // by filter
 ```
 
 ---
@@ -41,7 +33,6 @@ sherwood.trees.push({ name: 'Major Oak', planted: '1500-01-01' });
 Single-table queries with chaining. The workhorse API.
 
 ```typescript
-// All alive trees, sorted by planting date
 const trees = db.trees.select()
   .where({ alive: true })
   .orderBy('planted', 'asc')
@@ -53,10 +44,8 @@ const old = db.trees.select()
   .where({ planted: { $lt: '1600-01-01' } })
   .all();
 
-// Count
+// Count / single row
 const total = db.trees.select().where({ alive: true }).count();
-
-// Single row
 const oak = db.trees.select().where({ name: 'Major Oak' }).get();
 ```
 
@@ -64,24 +53,21 @@ const oak = db.trees.select().where({ name: 'Major Oak' }).get();
 
 ### 2. Fluent Join — `select().join(db.table).all()`
 
-Cross-table queries with auto-inferred foreign keys. No SQL, no manual FK strings.
+Cross-table queries with auto-inferred foreign keys from `z.lazy()` relationships.
 
 ```typescript
-// Join trees with their forest — FK auto-detected from z.lazy() relationship
 const rows = db.trees.select('name', 'planted')
   .join(db.forests, ['name', 'address'])
   .where({ alive: true })
   .orderBy('planted', 'asc')
   .all();
-
-// Result: [{ name: 'Major Oak', planted: '1500-01-01', forests_name: 'Sherwood', forests_address: 'Nottingham, UK' }]
+// → [{ name: 'Major Oak', planted: '1500-01-01',
+//      forests_name: 'Sherwood', forests_address: 'Nottingham, UK' }]
 ```
-
-The join is resolved automatically from your `z.lazy()` relationship declarations — no need to specify `forestId` or `id`.
 
 ### 3. Proxy Query — `db.query(c => { ... })`
 
-Full SQL-like control with destructured table aliases. For complex multi-table joins.
+Full SQL-like control with destructured table aliases. Supports WHERE on joined columns.
 
 ```typescript
 const rows = db.query(c => {
@@ -93,14 +79,13 @@ const rows = db.query(c => {
     orderBy: { [t.planted]: 'asc' },
   };
 });
-// [{ tree: 'Major Oak', forest: 'Sherwood', planted: '1500-01-01' }, ...]
 ```
 
 ---
 
 ## Relationships
 
-Define relationships with `z.lazy()`. The ORM auto-creates foreign key columns (integer), indexes, and navigation methods.
+Define with `z.lazy()`. The ORM auto-creates FK columns, indexes, and navigation methods.
 
 ```typescript
 interface Author { name: string; posts?: Post[]; }
@@ -120,15 +105,15 @@ const PostSchema: z.ZodType<Post> = z.object({
 **Navigation:**
 
 ```typescript
-// belongs-to: navigate child → parent
+// belongs-to: child → parent
 const post = db.posts.select().where({ title: 'Hello' }).get();
-const author = post.author();  // → { id: 1, name: 'Alice' }
+const author = post.author();
 
-// one-to-many: navigate parent → children
+// one-to-many: parent → children
 const alice = db.authors.get({ name: 'Alice' });
-const posts = alice.posts.find();  // → [{ id: 1, title: 'Hello' }, ...]
+const posts = alice.posts.find();
 
-// insert via relationship (auto-sets authorId)
+// insert via relationship (auto-sets FK)
 alice.posts.push({ title: 'New Post' });
 ```
 
@@ -137,25 +122,11 @@ alice.posts.push({ title: 'New Post' });
 ## CRUD
 
 ```typescript
-// Insert
 const user = db.users.insert({ name: 'Alice', role: 'admin' });
-
-// Get by ID
 const found = db.users.get(1);
-
-// Get by filter
-const admin = db.users.get({ role: 'admin' });
-
-// Update by ID
 db.users.update(1, { role: 'superadmin' });
-
-// Fluent update (returns affected count)
 db.users.update({ role: 'member' }).where({ role: 'guest' }).exec();
-
-// Upsert
 db.users.upsert({ name: 'Alice' }, { name: 'Alice', role: 'admin' });
-
-// Delete
 db.users.delete(1);
 ```
 
@@ -177,15 +148,6 @@ const db = new Database(':memory:', {
 db.users.insert({ name: '', email: 'bad', age: -1 });  // throws ZodError
 ```
 
-Defaults work too:
-
-```typescript
-const TreeSchema = z.object({
-  name: z.string(),
-  alive: z.boolean().default(true),  // auto-applied on insert
-});
-```
-
 ---
 
 ## Indexes
@@ -204,16 +166,9 @@ const db = new Database(':memory:', schemas, {
 ## Change Tracking
 
 ```typescript
-const db = new Database(':memory:', schemas, {
-  changeTracking: true,
-});
-
-// Get all changes since version 0
+const db = new Database(':memory:', schemas, { changeTracking: true });
 const changes = db.getChangesSince(0);
-// [{ version: 1, table_name: 'users', row_id: 1, action: 'INSERT' }, ...]
-
-// Filter by table
-const userChanges = db.getChangesSince(0, 'users');
+// [{ table_name: 'users', row_id: 1, action: 'INSERT' }, ...]
 ```
 
 ---
@@ -221,60 +176,58 @@ const userChanges = db.getChangesSince(0, 'users');
 ## Event Subscriptions
 
 ```typescript
-db.users.subscribe('insert', (user) => {
-  console.log('New user:', user.name);
-});
-
-db.users.subscribe('update', (user) => {
-  console.log('Updated:', user.name);
-});
-
-db.users.subscribe('delete', (user) => {
-  console.log('Deleted:', user.id);
-});
+db.users.subscribe('insert', (user) => console.log('New:', user.name));
+db.users.subscribe('update', (user) => console.log('Updated:', user.name));
 ```
 
 ---
 
-## Smart Polling (subscribe to query changes)
+## Smart Polling
 
 ```typescript
 const unsub = db.users.select()
   .where({ role: 'admin' })
-  .orderBy('name', 'asc')
   .subscribe((admins) => {
     console.log('Admin list changed:', admins);
   }, { interval: 1000 });
 
-// Stop listening
-unsub();
-```
-
-Uses fingerprint-based polling (`COUNT + MAX(id)`) — only re-fetches when data actually changes.
-
----
-
-## AST-Based Queries
-
-For complex expressions, use the callback-style WHERE with full operator support:
-
-```typescript
-const results = db.users.select()
-  .where((c, f, op) => op.and(
-    op.eq(f.lower(c.name), 'alice'),
-    op.gt(c.age, 18)
-  ))
-  .all();
+unsub(); // stop listening
 ```
 
 ---
 
-## Full Example
+## Examples
 
-See [`examples/forests.ts`](./examples/forests.ts) and [`examples/forests.test.ts`](./examples/forests.test.ts) for a complete working example covering all three query styles, relationships, mutations, validation, and more.
+Each example is a standalone script focused on one feature area:
+
+| Example | Focus | Run |
+|---|---|---|
+| [`basics.ts`](./examples/basics.ts) | CRUD, queries, operators, validation | `bun examples/basics.ts` |
+| [`relationships.ts`](./examples/relationships.ts) | z.lazy(), navigation, .push() | `bun examples/relationships.ts` |
+| [`queries.ts`](./examples/queries.ts) | All three query approaches | `bun examples/queries.ts` |
+
+Integration tests:
 
 ```bash
-bun test examples/forests.test.ts
+bun test
+```
+
+---
+
+## Project Structure
+
+```
+src/
+  index.ts           — public exports
+  database.ts        — Database class
+  types.ts           — type definitions
+  schema.ts          — schema parsing, storage transforms
+  query-builder.ts   — fluent select/join/where/orderBy
+  proxy-query.ts     — db.query(c => {...}) proxy callback
+  ast.ts             — AST compiler for callback-style WHERE
+
+examples/            — standalone runnable scripts
+test/                — unit + integration tests (76 tests)
 ```
 
 ---
