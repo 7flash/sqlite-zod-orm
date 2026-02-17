@@ -276,6 +276,105 @@ export class QueryBuilder<T extends Record<string, any>> {
         return (results[0] as any)?.count ?? 0;
     }
 
+    // ---------- Subscribe (Smart Polling) ----------
+
+    /**
+     * Subscribe to query result changes using smart interval-based polling.
+     *
+     * Instead of re-fetching all rows every tick, it runs a lightweight
+     * fingerprint query (`SELECT COUNT(*), MAX(id)`) with the same WHERE clause.
+     * The full query is only re-executed when the fingerprint changes.
+     *
+     * ```ts
+     * const unsub = db.messages.select()
+     *   .where({ groupId: 1 })
+     *   .orderBy('id', 'desc')
+     *   .limit(20)
+     *   .subscribe((rows) => {
+     *     console.log('Messages updated:', rows);
+     *   }, { interval: 1000 });
+     *
+     * // Later: stop listening
+     * unsub();
+     * ```
+     *
+     * @param callback  Called with the full result set whenever the data changes.
+     * @param options   `interval` in ms (default 500). Set `immediate` to false to skip the first call.
+     * @returns An unsubscribe function that clears the polling interval.
+     */
+    subscribe(
+        callback: (rows: T[]) => void,
+        options: { interval?: number; immediate?: boolean } = {},
+    ): () => void {
+        const { interval = 500, immediate = true } = options;
+
+        // Build the fingerprint SQL (COUNT + MAX(id)) using the same WHERE
+        const fingerprintSQL = this.buildFingerprintSQL();
+        let lastFingerprint: string | null = null;
+
+        const poll = () => {
+            try {
+                // Run lightweight fingerprint check
+                const fpRows = this.executor(fingerprintSQL.sql, fingerprintSQL.params, true);
+                const fpRow = fpRows[0] as any;
+                const currentFingerprint = `${fpRow?._cnt ?? 0}:${fpRow?._max ?? 0}`;
+
+                if (currentFingerprint !== lastFingerprint) {
+                    lastFingerprint = currentFingerprint;
+                    // Fingerprint changed → re-execute the full query
+                    const rows = this.all();
+                    callback(rows);
+                }
+            } catch {
+                // Silently skip on error (table might be in transition)
+            }
+        };
+
+        // Immediate first execution
+        if (immediate) {
+            poll();
+        }
+
+        const timer = setInterval(poll, interval);
+
+        // Return unsubscribe function
+        return () => {
+            clearInterval(timer);
+        };
+    }
+
+    /** Build a lightweight fingerprint query (COUNT + MAX(id)) that shares the same WHERE clause. */
+    private buildFingerprintSQL(): { sql: string; params: any[] } {
+        const params: any[] = [];
+        let sql = `SELECT COUNT(*) as _cnt, MAX(id) as _max FROM ${this.tableName}`;
+
+        if (this.iqo.whereAST) {
+            const compiled = compileAST(this.iqo.whereAST);
+            sql += ` WHERE ${compiled.sql}`;
+            params.push(...compiled.params);
+        } else if (this.iqo.wheres.length > 0) {
+            const whereParts: string[] = [];
+            for (const w of this.iqo.wheres) {
+                if (w.operator === 'IN') {
+                    const arr = w.value as any[];
+                    if (arr.length === 0) {
+                        whereParts.push('1 = 0');
+                    } else {
+                        const placeholders = arr.map(() => '?').join(', ');
+                        whereParts.push(`${w.field} IN (${placeholders})`);
+                        params.push(...arr.map(transformValueForStorage));
+                    }
+                } else {
+                    whereParts.push(`${w.field} ${w.operator} ?`);
+                    params.push(transformValueForStorage(w.value));
+                }
+            }
+            sql += ` WHERE ${whereParts.join(' AND ')}`;
+        }
+
+        return { sql, params };
+    }
+
     // ---------- Thenable (async/await support) ----------
 
     /**

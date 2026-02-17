@@ -1,5 +1,17 @@
 import { z } from 'zod';
 
+// ---------- SQL Identifier Quoting ----------
+
+/** Quote an identifier (table name, alias, column) to handle reserved words. */
+function q(name: string): string {
+    return `"${name}"`;
+}
+
+/** Quote a fully qualified alias.column reference. */
+function qRef(alias: string, column: string): string {
+    return `${q(alias)}.${q(column)}`;
+}
+
 // ---------- AST Node Types ----------
 
 /** Represents a column reference in the query AST. */
@@ -20,7 +32,7 @@ export class ColumnNode {
      * This returns the qualified column name for the ORM to parse.
      */
     toString(): string {
-        return `${this.alias}.${this.column}`;
+        return `${q(this.alias)}.${q(this.column)}`;
     }
 
     /** Also override valueOf for numeric contexts. */
@@ -77,9 +89,9 @@ interface AliasEntry {
  * Creates the root context proxy `c` that the user destructures.
  * Each table access generates a unique alias.
  */
-function createContextProxy(
-    schemas: Record<string, z.ZodObject<any>>,
-): { proxy: Record<string, Record<string, ColumnNode>>; aliases: Map<string, AliasEntry[]> } {
+export function createContextProxy(
+    schemas: Record<string, z.ZodType<any>>,
+): { proxy: Record<string, Record<string, ColumnNode>>; aliasMap: Map<string, AliasEntry[]> } {
     const aliases = new Map<string, AliasEntry[]>();
     let aliasCounter = 0;
 
@@ -89,7 +101,7 @@ function createContextProxy(
 
             const schema = schemas[tableName];
             const columns = schema
-                ? new Set(Object.keys(schema.shape))
+                ? new Set(Object.keys((schema as unknown as z.ZodObject<any>).shape))
                 : new Set<string>();
 
             aliasCounter++;
@@ -105,7 +117,7 @@ function createContextProxy(
         },
     });
 
-    return { proxy, aliases };
+    return { proxy, aliasMap: aliases };
 }
 
 // ---------- Query Result Shape ----------
@@ -149,13 +161,13 @@ export function compileProxyQuery(
     for (const [outputName, colOrValue] of Object.entries(queryResult.select)) {
         if (isColumnNode(colOrValue)) {
             if (outputName === colOrValue.column) {
-                selectParts.push(`${colOrValue.alias}.${colOrValue.column}`);
+                selectParts.push(qRef(colOrValue.alias, colOrValue.column));
             } else {
-                selectParts.push(`${colOrValue.alias}.${colOrValue.column} AS ${outputName}`);
+                selectParts.push(`${qRef(colOrValue.alias, colOrValue.column)} AS ${q(outputName)}`);
             }
         } else {
             // Literal value
-            selectParts.push(`? AS ${outputName}`);
+            selectParts.push(`? AS ${q(outputName)}`);
             params.push(colOrValue);
         }
     }
@@ -166,7 +178,7 @@ export function compileProxyQuery(
     if (allAliases.length === 0) throw new Error('No tables referenced in query.');
 
     const primaryAlias = allAliases[0]!;
-    let sql = `SELECT ${selectParts.join(', ')} FROM ${primaryAlias.tableName} ${primaryAlias.alias}`;
+    let sql = `SELECT ${selectParts.join(', ')} FROM ${q(primaryAlias.tableName)} ${q(primaryAlias.alias)}`;
 
     // Process JOINs
     if (queryResult.join) {
@@ -184,7 +196,7 @@ export function compileProxyQuery(
             // The non-primary side needs a JOIN clause
             const joinAlias = leftTable.alias === primaryAlias.alias ? rightTable : leftTable;
 
-            sql += ` JOIN ${joinAlias.tableName} ${joinAlias.alias} ON ${left.alias}.${left.column} = ${right.alias}.${right.column}`;
+            sql += ` JOIN ${q(joinAlias.tableName)} ${q(joinAlias.alias)} ON ${qRef(left.alias, left.column)} = ${qRef(right.alias, right.column)}`;
         }
     }
 
@@ -193,21 +205,22 @@ export function compileProxyQuery(
         const whereParts: string[] = [];
 
         for (const [key, value] of Object.entries(queryResult.where)) {
-            // The key could be "t1.column" (from toString trick) or a plain string
-            const dotIdx = key.indexOf('.');
+            // The key could be '"t1"."column"' (from toString trick) or a plain string
             let fieldRef: string;
 
-            if (dotIdx > 0 && tablesUsed.has(key.substring(0, dotIdx))) {
-                // It's an alias-qualified column name from toString()
+            // Match quoted alias.column pattern: "alias"."column"
+            const quotedMatch = key.match(/^"([^"]+)"\."([^"]+)"$/);
+            if (quotedMatch && tablesUsed.has(quotedMatch[1]!)) {
+                // Already fully quoted
                 fieldRef = key;
             } else {
                 // Plain field name — use the first table
-                fieldRef = `${primaryAlias.alias}.${key}`;
+                fieldRef = qRef(primaryAlias.alias, key);
             }
 
             if (isColumnNode(value)) {
                 // Column-to-column comparison
-                whereParts.push(`${fieldRef} = ${value.alias}.${value.column}`);
+                whereParts.push(`${fieldRef} = ${qRef(value.alias, value.column)}`);
             } else if (Array.isArray(value)) {
                 if (value.length === 0) {
                     whereParts.push('1 = 0');
@@ -242,12 +255,12 @@ export function compileProxyQuery(
     if (queryResult.orderBy) {
         const parts: string[] = [];
         for (const [key, dir] of Object.entries(queryResult.orderBy)) {
-            const dotIdx = key.indexOf('.');
             let fieldRef: string;
-            if (dotIdx > 0 && tablesUsed.has(key.substring(0, dotIdx))) {
+            const quotedMatch = key.match(/^"([^"]+)"\."([^"]+)"$/);
+            if (quotedMatch && tablesUsed.has(quotedMatch[1]!)) {
                 fieldRef = key;
             } else {
-                fieldRef = `${primaryAlias.alias}.${key}`;
+                fieldRef = qRef(primaryAlias.alias, key);
             }
             parts.push(`${fieldRef} ${dir.toUpperCase()}`);
         }
@@ -258,7 +271,7 @@ export function compileProxyQuery(
 
     // ---------- GROUP BY ----------
     if (queryResult.groupBy && queryResult.groupBy.length > 0) {
-        const parts = queryResult.groupBy.map(col => `${col.alias}.${col.column}`);
+        const parts = queryResult.groupBy.map(col => qRef(col.alias, col.column));
         sql += ` GROUP BY ${parts.join(', ')}`;
     }
 
@@ -284,12 +297,12 @@ export function compileProxyQuery(
  * @returns The query results.
  */
 export function executeProxyQuery<T>(
-    schemas: Record<string, z.ZodObject<any>>,
+    schemas: Record<string, z.ZodType<any>>,
     callback: (ctx: any) => ProxyQueryResult,
     executor: (sql: string, params: any[]) => T[],
 ): T[] {
-    const { proxy, aliases } = createContextProxy(schemas);
+    const { proxy, aliasMap } = createContextProxy(schemas);
     const queryResult = callback(proxy);
-    const { sql, params } = compileProxyQuery(queryResult, aliases);
+    const { sql, params } = compileProxyQuery(queryResult, aliasMap);
     return executor(sql, params);
 }

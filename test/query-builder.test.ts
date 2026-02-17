@@ -1,283 +1,262 @@
-// test/query-builder.test.ts
+/**
+ * Unit tests for src/query-builder.ts
+ *
+ * Tests the IQO compiler and QueryBuilder class independently,
+ * using mock executors instead of a real database.
+ */
 
-import { describe, it, expect, beforeAll } from 'bun:test';
-import { SatiDB, z } from '../src/satidb';
+import { test, expect } from 'bun:test';
+import { compileIQO, QueryBuilder } from '../src/query-builder';
 
-// ---------- Schema Definitions ----------
+// ── compileIQO ──────────────────────────────────────────────
 
-const ForestSchema = z.object({
-    name: z.string(),
-    region: z.string(),
-    trees: z.lazy(() => z.array(TreeSchema)).optional(),
+test('compileIQO: empty IQO produces SELECT * FROM table', () => {
+    const { sql, params } = compileIQO('users', {
+        selects: [], wheres: [], whereAST: null,
+        limit: null, offset: null, orderBy: [], includes: [], raw: false,
+    });
+    expect(sql).toBe('SELECT users.* FROM users');
+    expect(params).toEqual([]);
 });
 
-const TreeSchema = z.object({
-    species: z.string(),
-    height: z.number(),
-    plantedAt: z.date().optional(),
-    forestId: z.number().optional(),
-    forest: z.lazy(() => ForestSchema).optional(),
+test('compileIQO: specific columns', () => {
+    const { sql } = compileIQO('users', {
+        selects: ['name', 'age'], wheres: [], whereAST: null,
+        limit: null, offset: null, orderBy: [], includes: [], raw: false,
+    });
+    expect(sql).toBe('SELECT users.name, users.age FROM users');
 });
 
-describe('SatiDB - Fluent Query Builder API', () => {
-    let db: SatiDB<{ forests: typeof ForestSchema; trees: typeof TreeSchema }>;
-
-    beforeAll(() => {
-        db = new SatiDB(':memory:', {
-            forests: ForestSchema,
-            trees: TreeSchema,
-        });
-
-        // Seed data
-        const amazon = db.forests.insert({ name: 'Amazon', region: 'South America' });
-        const blackForest = db.forests.insert({ name: 'Black Forest', region: 'Europe' });
-        const redwood = db.forests.insert({ name: 'Redwood', region: 'North America' });
-
-        db.trees.insert({ species: 'Brazil Nut', height: 50, forestId: amazon.id, plantedAt: new Date('2020-01-15') });
-        db.trees.insert({ species: 'Rubber Tree', height: 30, forestId: amazon.id, plantedAt: new Date('2019-06-01') });
-        db.trees.insert({ species: 'Spruce', height: 40, forestId: blackForest.id, plantedAt: new Date('2018-03-10') });
-        db.trees.insert({ species: 'Oak', height: 25, forestId: blackForest.id, plantedAt: new Date('2021-09-20') });
-        db.trees.insert({ species: 'Coast Redwood', height: 115, forestId: redwood.id, plantedAt: new Date('2015-11-05') });
-        db.trees.insert({ species: 'Giant Sequoia', height: 85, forestId: redwood.id, plantedAt: new Date('2017-04-22') });
+test('compileIQO: WHERE conditions', () => {
+    const { sql, params } = compileIQO('users', {
+        selects: [], whereAST: null,
+        wheres: [
+            { field: 'name', operator: '=', value: 'Alice' },
+            { field: 'age', operator: '>', value: 18 },
+        ],
+        limit: null, offset: null, orderBy: [], includes: [], raw: false,
     });
-
-    // ---- select() basic ----
-
-    it('should return all rows with select().all()', () => {
-        const trees = db.trees.select().all();
-        expect(trees.length).toBe(6);
-    });
-
-    it('should return a single row with select().get()', () => {
-        const tree = db.trees.select().where({ species: 'Spruce' }).get();
-        expect(tree).not.toBeNull();
-        expect(tree?.species).toBe('Spruce');
-        expect(tree?.height).toBe(40);
-    });
-
-    it('should return null with .get() when nothing matches', () => {
-        const tree = db.trees.select().where({ species: 'Baobab' }).get();
-        expect(tree).toBeNull();
-    });
-
-    // ---- where() ----
-
-    it('should filter with simple equality', () => {
-        const trees = db.trees.select().where({ forestId: 1 }).all();
-        expect(trees.length).toBe(2);
-        expect(trees.every(t => t.forestId === 1)).toBe(true);
-    });
-
-    it('should filter with $gt operator', () => {
-        const tallTrees = db.trees.select().where({ height: { $gt: 50 } }).all();
-        expect(tallTrees.length).toBe(2);
-        expect(tallTrees.every(t => t.height > 50)).toBe(true);
-    });
-
-    it('should filter with $gte operator', () => {
-        const trees = db.trees.select().where({ height: { $gte: 50 } }).all();
-        expect(trees.length).toBe(3); // 50, 85, 115
-    });
-
-    it('should filter with $lt operator', () => {
-        const shortTrees = db.trees.select().where({ height: { $lt: 35 } }).all();
-        expect(shortTrees.length).toBe(2); // 30, 25
-    });
-
-    it('should filter with $ne operator', () => {
-        const nonSpruce = db.trees.select().where({ species: { $ne: 'Spruce' } }).all();
-        expect(nonSpruce.length).toBe(5);
-        expect(nonSpruce.every(t => t.species !== 'Spruce')).toBe(true);
-    });
-
-    it('should filter with $in operator', () => {
-        const trees = db.trees.select().where({ species: { $in: ['Oak', 'Spruce'] } }).all();
-        expect(trees.length).toBe(2);
-        const species = trees.map(t => t.species).sort();
-        expect(species).toEqual(['Oak', 'Spruce']);
-    });
-
-    it('should handle $in with empty array', () => {
-        const trees = db.trees.select().where({ species: { $in: [] } }).all();
-        expect(trees.length).toBe(0);
-    });
-
-    it('should combine multiple where conditions (AND)', () => {
-        const trees = db.trees.select()
-            .where({ forestId: 1, height: { $gt: 40 } })
-            .all();
-        expect(trees.length).toBe(1);
-        expect(trees[0]!.species).toBe('Brazil Nut');
-    });
-
-    // ---- limit() & offset() ----
-
-    it('should limit results', () => {
-        const trees = db.trees.select().limit(3).all();
-        expect(trees.length).toBe(3);
-    });
-
-    it('should support offset for pagination', () => {
-        const page1 = db.trees.select().orderBy('height', 'asc').limit(2).all();
-        const page2 = db.trees.select().orderBy('height', 'asc').limit(2).offset(2).all();
-
-        expect(page1.length).toBe(2);
-        expect(page2.length).toBe(2);
-        // Page 1 and page 2 should be different
-        expect(page1[0]!.height).not.toBe(page2[0]!.height);
-    });
-
-    // ---- orderBy() ----
-
-    it('should order by ascending', () => {
-        const trees = db.trees.select().orderBy('height', 'asc').all();
-        for (let i = 1; i < trees.length; i++) {
-            expect(trees[i]!.height).toBeGreaterThanOrEqual(trees[i - 1]!.height);
-        }
-    });
-
-    it('should order by descending', () => {
-        const trees = db.trees.select().orderBy('height', 'desc').all();
-        for (let i = 1; i < trees.length; i++) {
-            expect(trees[i]!.height).toBeLessThanOrEqual(trees[i - 1]!.height);
-        }
-    });
-
-    // ---- Chaining combination ----
-
-    it('should support full chain: select().where().orderBy().limit().all()', () => {
-        const trees = db.trees.select()
-            .where({ height: { $gte: 30 } })
-            .orderBy('height', 'desc')
-            .limit(3)
-            .all();
-
-        expect(trees.length).toBe(3);
-        expect(trees[0]!.species).toBe('Coast Redwood'); // tallest
-        for (let i = 1; i < trees.length; i++) {
-            expect(trees[i]!.height).toBeLessThanOrEqual(trees[i - 1]!.height);
-        }
-    });
-
-    // ---- raw() mode ----
-
-    it('should return raw rows without augmented methods when raw() is used', () => {
-        const trees = db.trees.select().raw().limit(1).all();
-        expect(trees.length).toBe(1);
-        // Raw rows should NOT have .update() or .delete() methods
-        expect(typeof (trees[0] as any).update).not.toBe('function');
-        expect(typeof (trees[0] as any).delete).not.toBe('function');
-    });
-
-    it('should return augmented entities by default (non-raw)', () => {
-        const trees = db.trees.select().limit(1).all();
-        expect(trees.length).toBe(1);
-        // Augmented entities should have .update() and .delete()
-        expect(typeof trees[0]?.update).toBe('function');
-        expect(typeof trees[0]?.delete).toBe('function');
-    });
-
-    // ---- count() ----
-
-    it('should count all records', () => {
-        const count = db.trees.select().count();
-        expect(count).toBe(6);
-    });
-
-    it('should count with where conditions', () => {
-        const count = db.trees.select().where({ forestId: 1 }).count();
-        expect(count).toBe(2);
-    });
-
-    // ---- Thenable (await) support ----
-
-    it('should be awaitable with then()', async () => {
-        const trees = await db.trees.select().where({ height: { $gt: 80 } });
-        expect(trees.length).toBe(2);
-        const species = trees.map(t => t.species).sort();
-        expect(species).toEqual(['Coast Redwood', 'Giant Sequoia']);
-    });
-
-    // ---- Forests (testing on second table) ----
-
-    it('should work with forests table too', () => {
-        const forests = db.forests.select().orderBy('name', 'asc').all();
-        expect(forests.length).toBe(3);
-        expect(forests[0]!.name).toBe('Amazon');
-        expect(forests[1]!.name).toBe('Black Forest');
-        expect(forests[2]!.name).toBe('Redwood');
-    });
-
-    it('should filter forests by region', () => {
-        const european = db.forests.select().where({ region: 'Europe' }).all();
-        expect(european.length).toBe(1);
-        expect(european[0]!.name).toBe('Black Forest');
-    });
-
-    // ---- Callback-style WHERE (AST-based) ----
-
-    it('should filter with callback-style where using op.eq', () => {
-        const trees = db.trees.select()
-            .where((c, f, op) => op.eq(c.species, 'Spruce'))
-            .all();
-        expect(trees.length).toBe(1);
-        expect(trees[0]!.species).toBe('Spruce');
-    });
-
-    it('should compose AND + GT in callback-style where', () => {
-        const trees = db.trees.select()
-            .where((c, f, op) => op.and(
-                op.eq(c.forestId, 1),
-                op.gt(c.height, 40),
-            ))
-            .all();
-        expect(trees.length).toBe(1);
-        expect(trees[0]!.species).toBe('Brazil Nut');
-    });
-
-    it('should use SQL functions via f proxy in callback-style where', () => {
-        const trees = db.trees.select()
-            .where((c, f, op) => op.eq(f.lower(c.species), 'spruce'))
-            .all();
-        expect(trees.length).toBe(1);
-        expect(trees[0]!.species).toBe('Spruce');
-    });
-
-    it('should chain callback-style where with limit and orderBy', () => {
-        const trees = db.trees.select()
-            .where((c, f, op) => op.gte(c.height, 30))
-            .orderBy('height', 'desc')
-            .limit(2)
-            .all();
-        expect(trees.length).toBe(2);
-        expect(trees[0]!.species).toBe('Coast Redwood');
-        expect(trees[1]!.species).toBe('Giant Sequoia');
-    });
-
-    it('should count with callback-style where', () => {
-        const count = db.trees.select()
-            .where((c, f, op) => op.gt(c.height, 50))
-            .count();
-        expect(count).toBe(2);
-    });
-
-    it('should support OR in callback-style where', () => {
-        const trees = db.trees.select()
-            .where((c, f, op) => op.or(
-                op.eq(c.species, 'Oak'),
-                op.eq(c.species, 'Spruce'),
-            ))
-            .all();
-        expect(trees.length).toBe(2);
-        const species = trees.map(t => t.species).sort();
-        expect(species).toEqual(['Oak', 'Spruce']);
-    });
-
-    it('should return null with callback-style .get() when nothing matches', () => {
-        const tree = db.trees.select()
-            .where((c, f, op) => op.eq(c.species, 'Baobab'))
-            .get();
-        expect(tree).toBeNull();
-    });
+    expect(sql).toBe('SELECT users.* FROM users WHERE name = ? AND age > ?');
+    expect(params).toEqual(['Alice', 18]);
 });
 
+test('compileIQO: IN operator', () => {
+    const { sql, params } = compileIQO('users', {
+        selects: [], whereAST: null,
+        wheres: [{ field: 'role', operator: 'IN', value: ['admin', 'mod'] }],
+        limit: null, offset: null, orderBy: [], includes: [], raw: false,
+    });
+    expect(sql).toContain('role IN (?, ?)');
+    expect(params).toEqual(['admin', 'mod']);
+});
+
+test('compileIQO: empty IN produces 1 = 0', () => {
+    const { sql } = compileIQO('users', {
+        selects: [], whereAST: null,
+        wheres: [{ field: 'role', operator: 'IN', value: [] }],
+        limit: null, offset: null, orderBy: [], includes: [], raw: false,
+    });
+    expect(sql).toContain('1 = 0');
+});
+
+test('compileIQO: ORDER BY, LIMIT, OFFSET', () => {
+    const { sql } = compileIQO('users', {
+        selects: [], wheres: [], whereAST: null,
+        limit: 10, offset: 20,
+        orderBy: [{ field: 'name', direction: 'asc' }],
+        includes: [], raw: false,
+    });
+    expect(sql).toBe('SELECT users.* FROM users ORDER BY name ASC LIMIT 10 OFFSET 20');
+});
+
+test('compileIQO: AST-based WHERE takes precedence over object wheres', () => {
+    const { sql, params } = compileIQO('users', {
+        selects: [],
+        wheres: [{ field: 'name', operator: '=', value: 'IGNORED' }],
+        whereAST: {
+            type: 'operator', op: '=',
+            left: { type: 'column', name: 'age' },
+            right: { type: 'literal', value: 30 },
+        },
+        limit: null, offset: null, orderBy: [], includes: [], raw: false,
+    });
+    expect(sql).toContain('("age" = ?)');
+    expect(sql).not.toContain('IGNORED');
+    expect(params).toEqual([30]);
+});
+
+test('compileIQO: Date values get ISO-stringified', () => {
+    const d = new Date('2025-06-15T00:00:00Z');
+    const { params } = compileIQO('events', {
+        selects: [], whereAST: null,
+        wheres: [{ field: 'createdAt', operator: '>', value: d }],
+        limit: null, offset: null, orderBy: [], includes: [], raw: false,
+    });
+    expect(params[0]).toBe(d.toISOString());
+});
+
+// ── QueryBuilder (with mock executors) ──────────────────────
+
+function createMockBuilder() {
+    const calls: { sql: string; params: any[]; raw: boolean }[] = [];
+    const mockData = [
+        { id: 1, name: 'Alice', age: 30 },
+        { id: 2, name: 'Bob', age: 25 },
+    ];
+
+    const executor = (sql: string, params: any[], raw: boolean) => {
+        calls.push({ sql, params, raw });
+        return mockData;
+    };
+    const singleExecutor = (sql: string, params: any[], raw: boolean) => {
+        calls.push({ sql, params, raw });
+        return mockData[0];
+    };
+
+    const qb = new QueryBuilder<{ id: number; name: string; age: number }>(
+        'users', executor, singleExecutor,
+    );
+
+    return { qb, calls };
+}
+
+test('QueryBuilder: .all() calls executor', () => {
+    const { qb, calls } = createMockBuilder();
+    const result = qb.all();
+    expect(calls.length).toBe(1);
+    expect(calls[0].sql).toContain('SELECT');
+    expect(result.length).toBe(2);
+});
+
+test('QueryBuilder: .get() sets limit 1 and calls singleExecutor', () => {
+    const { qb, calls } = createMockBuilder();
+    qb.get();
+    expect(calls.length).toBe(1);
+    expect(calls[0].sql).toContain('LIMIT 1');
+});
+
+test('QueryBuilder: chaining builds correct SQL', () => {
+    const { qb, calls } = createMockBuilder();
+    qb.select('name', 'age')
+        .where({ name: 'Alice' })
+        .orderBy('age', 'desc')
+        .limit(5)
+        .offset(10)
+        .all();
+
+    const sql = calls[0].sql;
+    expect(sql).toContain('users.name, users.age');
+    expect(sql).toContain('WHERE');
+    expect(sql).toContain('ORDER BY age DESC');
+    expect(sql).toContain('LIMIT 5');
+    expect(sql).toContain('OFFSET 10');
+});
+
+test('QueryBuilder: .raw() passes raw=true to executor', () => {
+    const { qb, calls } = createMockBuilder();
+    qb.raw().all();
+    expect(calls[0].raw).toBe(true);
+});
+
+test('QueryBuilder: callback where generates AST-based SQL', () => {
+    const { qb, calls } = createMockBuilder();
+    qb.where((c, f, op) => op.eq(c.name, 'Alice')).all();
+
+    const sql = calls[0].sql;
+    expect(sql).toContain('("name" = ?)');
+    expect(calls[0].params).toEqual(['Alice']);
+});
+
+test('QueryBuilder: multiple .where() calls compose with AND', () => {
+    const { qb, calls } = createMockBuilder();
+    qb.where({ age: 30 }).where({ name: 'Alice' }).all();
+
+    const sql = calls[0].sql;
+    expect(sql).toContain('age = ?');
+    expect(sql).toContain('AND');
+    expect(sql).toContain('name = ?');
+});
+
+test('QueryBuilder: operator objects $gt, $in, $ne', () => {
+    const { qb, calls } = createMockBuilder();
+    qb.where({ age: { $gt: 18 }, name: { $ne: 'admin' } }).all();
+
+    const sql = calls[0].sql;
+    expect(sql).toContain('age > ?');
+    expect(sql).toContain('name != ?');
+    expect(calls[0].params).toContain(18);
+    expect(calls[0].params).toContain('admin');
+});
+
+test('QueryBuilder: invalid operator throws', () => {
+    const { qb } = createMockBuilder();
+    expect(() => qb.where({ age: { $invalid: 5 } } as any).all()).toThrow();
+});
+
+test('QueryBuilder: thenable resolves to .all()', async () => {
+    const { qb } = createMockBuilder();
+    const result = await qb;
+    expect(result.length).toBe(2);
+});
+
+// ── Subscribe ───────────────────────────────────────────────
+
+test('QueryBuilder: subscribe fires callback immediately and on change', async () => {
+    let callCount = 0;
+    let counter = 0;
+
+    const executor = (sql: string, params: any[], raw: boolean) => {
+        // Fingerprint query returns changing count on 2nd call
+        if (sql.includes('_cnt')) {
+            counter++;
+            return [{ _cnt: counter, _max: counter }];
+        }
+        return [{ id: 1, name: 'Alice', age: 30 }];
+    };
+    const singleExecutor = () => null;
+
+    const qb = new QueryBuilder<{ id: number; name: string; age: number }>(
+        'users', executor, singleExecutor,
+    );
+
+    const unsub = qb.subscribe(() => { callCount++; }, { interval: 30 });
+
+    // Immediate call
+    expect(callCount).toBe(1);
+
+    // Wait for a couple ticks — fingerprint keeps changing so callback fires each time
+    await new Promise(r => setTimeout(r, 100));
+    expect(callCount).toBeGreaterThan(1);
+
+    unsub();
+    const countAfterUnsub = callCount;
+    await new Promise(r => setTimeout(r, 80));
+    // No more calls after unsubscribe
+    expect(callCount).toBe(countAfterUnsub);
+});
+
+test('QueryBuilder: subscribe does not fire when fingerprint unchanged', async () => {
+    let callCount = 0;
+
+    const executor = (sql: string) => {
+        // Always returns same fingerprint
+        if (sql.includes('_cnt')) {
+            return [{ _cnt: 5, _max: 10 }];
+        }
+        return [{ id: 1 }];
+    };
+    const singleExecutor = () => null;
+
+    const qb = new QueryBuilder<{ id: number }>(
+        'users', executor, singleExecutor,
+    );
+
+    const unsub = qb.subscribe(() => { callCount++; }, { interval: 30 });
+
+    expect(callCount).toBe(1); // immediate
+    await new Promise(r => setTimeout(r, 100));
+    // Fingerprint never changed, so no additional calls
+    expect(callCount).toBe(1);
+
+    unsub();
+});

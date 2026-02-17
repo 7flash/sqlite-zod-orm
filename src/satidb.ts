@@ -5,7 +5,10 @@ import { QueryBuilder } from './query-builder';
 import { executeProxyQuery, type ProxyQueryResult } from './proxy-query';
 
 type ZodType = z.ZodTypeAny;
-type SchemaMap = Record<string, z.ZodObject<any>>;
+type SchemaMap = Record<string, z.ZodType<any>>;
+
+/** Internal cast: all schemas are z.object() at runtime, but may be typed as z.ZodType<T> */
+const asZodObject = (s: z.ZodType<any>) => s as unknown as z.ZodObject<any>;
 
 type Relationship = {
   type: 'belongs-to' | 'one-to-many';
@@ -24,17 +27,17 @@ type LazyMethod<T = any, R = any> = {
 };
 
 // --- Type Helpers for Stronger Safety ---
-type InferSchema<S extends z.ZodObject<any>> = z.infer<S>;
+type InferSchema<S extends z.ZodType<any>> = z.infer<S>;
 
-type EntityData<S extends z.ZodObject<any>> = Omit<InferSchema<S>, 'id'>;
+type EntityData<S extends z.ZodType<any>> = Omit<InferSchema<S>, 'id'>;
 
-type AugmentedEntity<S extends z.ZodObject<any>> = InferSchema<S> & {
+type AugmentedEntity<S extends z.ZodType<any>> = InferSchema<S> & {
   update: (data: Partial<EntityData<S>>) => AugmentedEntity<S> | null;
   delete: () => void;
   [key: string]: any;
 };
 
-type OneToManyRelationship<S extends z.ZodObject<any>> = {
+type OneToManyRelationship<S extends z.ZodType<any>> = {
   insert: (data: EntityData<S>) => AugmentedEntity<S>;
   get: (conditions: number | Partial<InferSchema<S>>) => AugmentedEntity<S> | null;
   findOne: (conditions: Record<string, any>) => AugmentedEntity<S> | null;
@@ -47,7 +50,7 @@ type OneToManyRelationship<S extends z.ZodObject<any>> = {
   push: (data: EntityData<S>) => AugmentedEntity<S>;
 };
 
-type EntityAccessor<S extends z.ZodObject<any>> = {
+type EntityAccessor<S extends z.ZodType<any>> = {
   insert: (data: EntityData<S>) => AugmentedEntity<S>;
   get: (conditions: number | Partial<InferSchema<S>>) => AugmentedEntity<S> | null;
   findMany: (options: { where?: Record<string, any>; orderBy?: Record<string, 'asc' | 'desc'>; take?: number }) => AugmentedEntity<S>[];
@@ -110,7 +113,7 @@ class _SatiDB<Schemas extends SchemaMap> extends EventEmitter {
   private parseRelationships(schemas: SchemaMap): Relationship[] {
     const relationships: Relationship[] = [];
     for (const [entityName, schema] of Object.entries(schemas)) {
-      const shape = schema.shape as Record<string, ZodType>;
+      const shape = asZodObject(schema).shape as Record<string, ZodType>;
       for (const [fieldName, fieldSchema] of Object.entries(shape)) {
         let actualSchema = fieldSchema;
         if (actualSchema instanceof z.ZodOptional) {
@@ -273,16 +276,16 @@ class _SatiDB<Schemas extends SchemaMap> extends EventEmitter {
     }
   }
 
-  private isRelationshipField(schema: z.ZodObject<any>, key: string): boolean {
-    let fieldSchema = schema.shape[key];
+  private isRelationshipField(schema: z.ZodType<any>, key: string): boolean {
+    let fieldSchema = asZodObject(schema).shape[key];
     if (fieldSchema instanceof z.ZodOptional) {
       fieldSchema = fieldSchema._def.innerType;
     }
     return fieldSchema instanceof z.ZodLazy;
   }
 
-  private getStorableFields(schema: z.ZodObject<any>): { name: string; type: ZodType }[] {
-    return Object.entries(schema.shape)
+  private getStorableFields(schema: z.ZodType<any>): { name: string; type: ZodType }[] {
+    return Object.entries(asZodObject(schema).shape)
       .filter(([key]) => key !== 'id' && !this.isRelationshipField(schema, key))
       .map(([name, type]) => ({ name, type: type as ZodType }));
   }
@@ -315,10 +318,10 @@ class _SatiDB<Schemas extends SchemaMap> extends EventEmitter {
     return transformed;
   }
 
-  private transformFromStorage(row: Record<string, any>, schema: z.ZodObject<any>): Record<string, any> {
+  private transformFromStorage(row: Record<string, any>, schema: z.ZodType<any>): Record<string, any> {
     const transformed: Record<string, any> = {};
     for (const [key, value] of Object.entries(row)) {
-      let fieldSchema = schema.shape[key];
+      let fieldSchema = asZodObject(schema).shape[key];
       if (fieldSchema instanceof z.ZodOptional) {
         fieldSchema = fieldSchema._def.innerType;
       }
@@ -398,7 +401,7 @@ class _SatiDB<Schemas extends SchemaMap> extends EventEmitter {
       }
     }
 
-    const storableFieldNames = new Set(this.getStorableFields(this.schemas[entityName]).map(f => f.name));
+    const storableFieldNames = new Set(this.getStorableFields(this.schemas[entityName]!).map(f => f.name));
     const proxyHandler: ProxyHandler<T> = {
       set: (target: T, prop: string, value: any): boolean => {
         if (storableFieldNames.has(prop) && target[prop] !== value) {
@@ -484,7 +487,7 @@ class _SatiDB<Schemas extends SchemaMap> extends EventEmitter {
         const alias = `${includeField}_tbl`;
         joinedTables.push({ alias, entityName: relationship.to, relationship });
 
-        const joinedSchema = this.schemas[relationship.to];
+        const joinedSchema = this.schemas[relationship.to]!;
         const joinedFields = ['id', ...this.getStorableFields(joinedSchema).map(f => f.name)];
         const aliasedColumns = joinedFields.map(field => `${alias}.${field} AS ${alias}_${field}`);
         sql += `, ${aliasedColumns.join(', ')}`;
@@ -527,7 +530,7 @@ class _SatiDB<Schemas extends SchemaMap> extends EventEmitter {
 
     for (const row of rows) {
       const mainEntity: Record<string, any> = {};
-      const mainSchema = this.schemas[entityName];
+      const mainSchema = this.schemas[entityName]!;
       const mainFields = ['id', ...this.getStorableFields(mainSchema).map(f => f.name)];
 
       for (const field of mainFields) {
@@ -539,7 +542,7 @@ class _SatiDB<Schemas extends SchemaMap> extends EventEmitter {
       const includedData: Record<string, any> = {};
       for (const { alias, entityName: joinedEntityName, relationship } of joinedTables) {
         const joinedEntity: Record<string, any> = {};
-        const joinedSchema = this.schemas[joinedEntityName];
+        const joinedSchema = this.schemas[joinedEntityName]!;
         const joinedFields = ['id', ...this.getStorableFields(joinedSchema).map(f => f.name)];
 
         let hasData = false;
@@ -552,13 +555,13 @@ class _SatiDB<Schemas extends SchemaMap> extends EventEmitter {
         }
 
         if (hasData) {
-          const transformedJoinedEntity = this.transformFromStorage(joinedEntity, joinedSchema);
+          const transformedJoinedEntity = this.transformFromStorage(joinedEntity, joinedSchema!);
           const augmentedJoinedEntity = this._attachMethods(joinedEntityName, transformedJoinedEntity);
           includedData[relationship.relationshipField] = augmentedJoinedEntity;
         }
       }
 
-      entities.push(this.transformFromStorage(mainEntity, mainSchema));
+      entities.push(this.transformFromStorage(mainEntity, mainSchema!));
       includedDataArray.push(includedData);
     }
 
@@ -595,7 +598,7 @@ class _SatiDB<Schemas extends SchemaMap> extends EventEmitter {
           if (!relatedByParent[parentId]) {
             relatedByParent[parentId] = [];
           }
-          const transformedEntity = this.transformFromStorage(row, this.schemas[relationship.to]);
+          const transformedEntity = this.transformFromStorage(row, this.schemas[relationship.to]!);
           const augmentedEntity = this._attachMethods(relationship.to, transformedEntity);
           relatedByParent[parentId].push(augmentedEntity);
         }
@@ -621,7 +624,7 @@ class _SatiDB<Schemas extends SchemaMap> extends EventEmitter {
     }
   }
 
-  private preprocessRelationshipFields(schema: z.ZodObject<any>, data: Record<string, any>): Record<string, any> {
+  private preprocessRelationshipFields(schema: z.ZodType<any>, data: Record<string, any>): Record<string, any> {
     const processedData = { ...data };
     for (const [key, value] of Object.entries(data)) {
       if (this.isRelationshipField(schema, key)) {
@@ -641,10 +644,10 @@ class _SatiDB<Schemas extends SchemaMap> extends EventEmitter {
 
   private insert<T extends Record<string, any>>(entityName: string, data: Omit<T, 'id'>): AugmentedEntity<any> {
     const schema = this.schemas[entityName];
-    const processedData = this.preprocessRelationshipFields(schema, data);
-    const validatedData = schema.passthrough().parse(processedData);
+    const processedData = this.preprocessRelationshipFields(schema!, data);
+    const validatedData = asZodObject(schema!).passthrough().parse(processedData);
     const storableData = Object.fromEntries(
-      Object.entries(validatedData).filter(([key]) => !this.isRelationshipField(schema, key))
+      Object.entries(validatedData).filter(([key]) => !this.isRelationshipField(schema!, key))
     );
     const transformedData = this.transformForStorage(storableData);
     const columns = Object.keys(transformedData);
@@ -739,7 +742,7 @@ class _SatiDB<Schemas extends SchemaMap> extends EventEmitter {
       const rows = this.db.query(sql).all(...whereValues);
 
       return rows.map(row => {
-        const entity = this.transformFromStorage(row as any, this.schemas[entityName]) as T;
+        const entity = this.transformFromStorage(row as any, this.schemas[entityName]!) as T;
         return this._attachMethods(entityName, entity);
       });
     }
@@ -776,7 +779,7 @@ class _SatiDB<Schemas extends SchemaMap> extends EventEmitter {
       const offsetClause = $offset ? `OFFSET ${$offset}` : '';
       const sql = `SELECT * FROM ${entityName} ${whereClause} ${orderByClause} ${limitClause} ${offsetClause}`;
       const rows = this.db.query(sql).all(...whereValues);
-      entities = rows.map(row => this.transformFromStorage(row as any, this.schemas[entityName]) as T);
+      entities = rows.map(row => this.transformFromStorage(row as any, this.schemas[entityName]!) as T);
       includedDataArray = entities.map(() => ({}));
     }
 
@@ -796,7 +799,7 @@ class _SatiDB<Schemas extends SchemaMap> extends EventEmitter {
 
   private update<T extends Record<string, any>>(entityName: string, id: number, data: Partial<Omit<T, 'id'>>): AugmentedEntity<any> | null {
     const schema = this.schemas[entityName];
-    const validatedData = schema!.partial().parse(data);
+    const validatedData = asZodObject(schema!).partial().parse(data);
     const transformedData = this.transformForStorage(validatedData);
     if (Object.keys(transformedData).length === 0) return this.get(entityName, { id } as unknown as Partial<T>);
     const setClause = Object.keys(transformedData).map(key => `${key} = ?`).join(', ');
@@ -840,8 +843,8 @@ class _SatiDB<Schemas extends SchemaMap> extends EventEmitter {
 
   private upsert<T extends Record<string, any>>(entityName: string, data: Omit<T, 'id'> & { id?: string }, conditions: Partial<T> = {}): AugmentedEntity<any> {
     const schema = this.schemas[entityName];
-    const processedData = this.preprocessRelationshipFields(schema, data);
-    const processedConditions = this.preprocessRelationshipFields(schema, conditions);
+    const processedData = this.preprocessRelationshipFields(schema!, data);
+    const processedConditions = this.preprocessRelationshipFields(schema!, conditions);
     const hasId = processedData.id && typeof processedData.id === 'number';
     const existing = hasId ? this.get(entityName, { id: processedData.id } as Partial<T>) : Object.keys(processedConditions).length > 0 ? this.get(entityName, processedConditions) : null;
     if (existing) {

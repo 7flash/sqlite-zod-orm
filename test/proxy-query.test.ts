@@ -1,164 +1,144 @@
-// test/proxy-query.test.ts
+/**
+ * Unit tests for src/proxy-query.ts
+ *
+ * Tests the ColumnNode, context proxy creation, and proxy query
+ * compilation in isolation.
+ */
 
-import { describe, it, expect, beforeAll } from 'bun:test';
-import { SatiDB, z } from '../src/satidb';
+import { test, expect } from 'bun:test';
+import { ColumnNode, createContextProxy, compileProxyQuery } from '../src/proxy-query';
 
-// ---------- Schema Definitions ----------
+// ── ColumnNode ──────────────────────────────────────────────
 
-const ForestSchema = z.object({
-    name: z.string(),
-    region: z.string(),
-    trees: z.lazy(() => z.array(TreeSchema)).optional(),
+test('ColumnNode stores table, column, alias', () => {
+    const node = new ColumnNode('users', 'name', 't1');
+    expect(node.table).toBe('users');
+    expect(node.column).toBe('name');
+    expect(node.alias).toBe('t1');
+    expect(node._type).toBe('COL');
 });
 
-const TreeSchema = z.object({
-    species: z.string(),
-    height: z.number(),
-    plantedAt: z.date().optional(),
-    forestId: z.number().optional(),
-    forest: z.lazy(() => ForestSchema).optional(),
+test('ColumnNode.toString() returns quoted alias.column for computed keys', () => {
+    const node = new ColumnNode('users', 'email', 't2');
+    expect(node.toString()).toBe('"t2"."email"');
+    expect(`${node}`).toBe('"t2"."email"');
 });
 
-describe('SatiDB - Proxy Callback Query API (Midnight Style)', () => {
-    let db: SatiDB<{ forests: typeof ForestSchema; trees: typeof TreeSchema }>;
+// ── createContextProxy ──────────────────────────────────────
 
-    beforeAll(() => {
-        db = new SatiDB(':memory:', {
-            forests: ForestSchema,
-            trees: TreeSchema,
-        });
+test('context proxy returns table proxies with ColumnNode columns', () => {
+    const schemas: any = {
+        users: { shape: { name: {}, age: {} } },
+        posts: { shape: { title: {}, content: {} } },
+    };
 
-        // Seed data
-        const amazon = db.forests.insert({ name: 'Amazon', region: 'South America' });
-        const blackForest = db.forests.insert({ name: 'Black Forest', region: 'Europe' });
-        const redwood = db.forests.insert({ name: 'Redwood', region: 'North America' });
+    const { proxy, aliasMap } = createContextProxy(schemas);
+    const u = (proxy as any).users;
 
-        db.trees.insert({ species: 'Brazil Nut', height: 50, forestId: amazon.id, plantedAt: new Date('2020-01-15') });
-        db.trees.insert({ species: 'Rubber Tree', height: 30, forestId: amazon.id, plantedAt: new Date('2019-06-01') });
-        db.trees.insert({ species: 'Spruce', height: 40, forestId: blackForest.id, plantedAt: new Date('2018-03-10') });
-        db.trees.insert({ species: 'Oak', height: 25, forestId: blackForest.id, plantedAt: new Date('2021-09-20') });
-        db.trees.insert({ species: 'Coast Redwood', height: 115, forestId: redwood.id, plantedAt: new Date('2015-11-05') });
-        db.trees.insert({ species: 'Giant Sequoia', height: 85, forestId: redwood.id, plantedAt: new Date('2017-04-22') });
-    });
+    const col: ColumnNode = u.name;
+    expect(col).toBeInstanceOf(ColumnNode);
+    expect(col.table).toBe('users');
+    expect(col.column).toBe('name');
 
-    // ---- Basic proxy query with JOIN ----
+    expect(aliasMap.size).toBeGreaterThan(0);
+});
 
-    it('should perform a basic JOIN query via proxy callback', () => {
-        const results = db.query(c => {
-            const { trees: t, forests: f } = c;
-            return {
-                select: { species: t.species, height: t.height, forest: f.name },
-                join: [t.forestId, f.id],
-            };
-        });
+test('context proxy assigns unique aliases to different tables', () => {
+    const schemas: any = {
+        users: { shape: { name: {} } },
+        posts: { shape: { title: {} } },
+    };
 
-        expect(results.length).toBe(6);
-        // All results should have the forest name
-        expect(results.every((r: any) => typeof r.forest === 'string')).toBe(true);
-    });
+    const { proxy } = createContextProxy(schemas);
+    const uCol: ColumnNode = (proxy as any).users.name;
+    const pCol: ColumnNode = (proxy as any).posts.title;
 
-    it('should filter with WHERE using computed key (toString trick)', () => {
-        const results = db.query(c => {
-            const { trees: t, forests: f } = c;
-            return {
-                select: { species: t.species, forest: f.name },
-                join: [t.forestId, f.id],
-                where: { [f.name]: 'Amazon' },
-            };
-        });
+    expect(uCol.alias).not.toBe(pCol.alias);
+});
 
-        expect(results.length).toBe(2);
-        expect(results.every((r: any) => r.forest === 'Amazon')).toBe(true);
-        const species = results.map((r: any) => r.species).sort();
-        expect(species).toEqual(['Brazil Nut', 'Rubber Tree']);
-    });
+// ── compileProxyQuery ───────────────────────────────────────
 
-    it('should support WHERE with literal values', () => {
-        const results = db.query(c => {
-            const { trees: t } = c;
-            return {
-                select: { species: t.species, height: t.height },
-                where: { [t.height]: { $gt: 80 } },
-            };
-        });
+test('compileProxyQuery: basic SELECT without JOIN', () => {
+    const schemas: any = { users: { shape: { name: {}, age: {} } } };
+    const { proxy, aliasMap } = createContextProxy(schemas);
+    const u = (proxy as any).users;
 
-        expect(results.length).toBe(2);
-        expect(results.every((r: any) => r.height > 80)).toBe(true);
-    });
+    const { sql, params } = compileProxyQuery(
+        { select: { name: u.name, age: u.age } },
+        aliasMap,
+    );
+    expect(sql).toContain('SELECT');
+    expect(sql).toContain('name');
+    expect(sql).toContain('age');
+    expect(params).toEqual([]);
+});
 
-    it('should support LIMIT in proxy query', () => {
-        const results = db.query(c => {
-            const { trees: t } = c;
-            return {
-                select: { species: t.species },
-                limit: 2,
-            };
-        });
+test('compileProxyQuery: WHERE with literal value', () => {
+    const schemas: any = { users: { shape: { name: {}, age: {} } } };
+    const { proxy, aliasMap } = createContextProxy(schemas);
+    const u = (proxy as any).users;
 
-        expect(results.length).toBe(2);
-    });
+    const { sql, params } = compileProxyQuery(
+        { select: { name: u.name }, where: { [u.name]: 'Alice' } },
+        aliasMap,
+    );
+    expect(sql).toContain('WHERE');
+    expect(params).toContain('Alice');
+});
 
-    it('should support ORDER BY in proxy query', () => {
-        const results = db.query(c => {
-            const { trees: t } = c;
-            return {
-                select: { species: t.species, height: t.height },
-                orderBy: { [t.height]: 'desc' },
-            };
-        });
+test('compileProxyQuery: WHERE with $gt operator', () => {
+    const schemas: any = { users: { shape: { name: {}, age: {} } } };
+    const { proxy, aliasMap } = createContextProxy(schemas);
+    const u = (proxy as any).users;
 
-        expect(results.length).toBe(6);
-        // Should be descending by height
-        for (let i = 1; i < results.length; i++) {
-            expect((results[i] as any).height).toBeLessThanOrEqual((results[i - 1] as any).height);
-        }
-    });
+    const { sql, params } = compileProxyQuery(
+        { select: { name: u.name }, where: { [u.age]: { $gt: 18 } } },
+        aliasMap,
+    );
+    expect(sql).toContain('>');
+    expect(params).toContain(18);
+});
 
-    // ---- Single table query (no join) ----
+test('compileProxyQuery: LIMIT', () => {
+    const schemas: any = { users: { shape: { name: {} } } };
+    const { proxy, aliasMap } = createContextProxy(schemas);
+    const u = (proxy as any).users;
 
-    it('should work without JOIN for single-table queries', () => {
-        const results = db.query(c => {
-            const { forests: f } = c;
-            return {
-                select: { name: f.name, region: f.region },
-                where: { [f.region]: 'Europe' },
-            };
-        });
+    const { sql } = compileProxyQuery(
+        { select: { name: u.name }, limit: 5 },
+        aliasMap,
+    );
+    expect(sql).toContain('LIMIT 5');
+});
 
-        expect(results.length).toBe(1);
-        expect((results[0] as any).name).toBe('Black Forest');
-    });
+test('compileProxyQuery: ORDER BY', () => {
+    const schemas: any = { users: { shape: { name: {}, age: {} } } };
+    const { proxy, aliasMap } = createContextProxy(schemas);
+    const u = (proxy as any).users;
 
-    // ---- Combined features ----
+    const { sql } = compileProxyQuery(
+        { select: { name: u.name }, orderBy: { [u.age]: 'desc' } },
+        aliasMap,
+    );
+    expect(sql).toContain('ORDER BY');
+    expect(sql).toContain('DESC');
+});
 
-    it('should combine JOIN + WHERE + ORDER BY + LIMIT', () => {
-        const results = db.query(c => {
-            const { trees: t, forests: f } = c;
-            return {
-                select: { species: t.species, height: t.height, forest: f.name },
-                join: [t.forestId, f.id],
-                where: { [t.height]: { $gt: 30 } },
-                orderBy: { [t.height]: 'asc' },
-                limit: 3,
-            };
-        });
+test('compileProxyQuery: JOIN between two tables', () => {
+    const schemas: any = {
+        users: { shape: { name: {}, id: {} } },
+        posts: { shape: { title: {}, userId: {} } },
+    };
+    const { proxy, aliasMap } = createContextProxy(schemas);
+    const u = (proxy as any).users;
+    const p = (proxy as any).posts;
 
-        expect(results.length).toBe(3);
-        // All should have height > 30
-        expect(results.every((r: any) => r.height > 30)).toBe(true);
-        // Should be ascending
-        for (let i = 1; i < results.length; i++) {
-            expect((results[i] as any).height).toBeGreaterThanOrEqual((results[i - 1] as any).height);
-        }
-    });
-
-    // ---- ColumnNode toString verification ----
-
-    it('should generate correct alias.column strings via toString()', () => {
-        // Access a proxy to verify the ColumnNode toString behavior
-        const { ColumnNode } = require('../src/proxy-query');
-        const node = new ColumnNode('users', 'name', 't1');
-        expect(node.toString()).toBe('t1.name');
-        expect(`${node}`).toBe('t1.name');
-    });
+    const { sql } = compileProxyQuery(
+        {
+            select: { name: u.name, title: p.title },
+            join: [p.userId, u.id],
+        },
+        aliasMap,
+    );
+    expect(sql).toContain('JOIN');
 });
