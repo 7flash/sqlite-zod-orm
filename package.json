@@ -1,7 +1,7 @@
 {
-  "name": "satidb",
-  "version": "2.2.1",
-  "description": "A fast, type-safe SQLite database wrapper for Bun",
+  "name": "sqlite-zod-orm",
+  "version": "3.0.0",
+  "description": "A fast, type-safe SQLite ORM for Bun powered by Zod schemas",
   "type": "module",
   "main": "./dist/satidb.js",
   "module": "./dist/satidb.js",
@@ -13,7 +13,7 @@
     }
   },
   "bin": {
-    "satidb": "./dist/satidb.js"
+    "sqlite-zod-orm": "./dist/satidb.js"
   },
   "scripts": {
     "build": "bun run ./src/build.ts",

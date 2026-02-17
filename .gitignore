@@ -38,3 +38,5 @@ bun.lock
 *.sqlite
 
 .prompts
+
+*.db
