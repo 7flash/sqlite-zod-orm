@@ -5,60 +5,12 @@ import { z } from 'zod';
 import type { SchemaMap, ZodType, Relationship } from './types';
 import { asZodObject } from './types';
 
-/** Parse z.lazy() fields to detect belongs-to and one-to-many relationships */
-export function parseRelationships(schemas: SchemaMap): Relationship[] {
-    const relationships: Relationship[] = [];
-
-    for (const [entityName, schema] of Object.entries(schemas)) {
-        const shape = asZodObject(schema).shape as Record<string, ZodType>;
-
-        for (const [fieldName, fieldSchema] of Object.entries(shape)) {
-            let actualSchema = fieldSchema;
-            if (actualSchema instanceof z.ZodOptional) {
-                actualSchema = actualSchema._def.innerType;
-            }
-
-            if (actualSchema instanceof z.ZodLazy) {
-                const lazySchema = actualSchema._def.getter();
-                let relType: 'belongs-to' | 'one-to-many' | null = null;
-                let targetSchema: z.ZodObject<any> | null = null;
-
-                if (lazySchema instanceof z.ZodArray) {
-                    relType = 'one-to-many';
-                    targetSchema = lazySchema._def.type;
-                } else {
-                    relType = 'belongs-to';
-                    targetSchema = lazySchema;
-                }
-
-                if (relType && targetSchema) {
-                    const targetEntityName = Object.keys(schemas).find(
-                        name => schemas[name] === targetSchema
-                    );
-                    if (targetEntityName) {
-                        const foreignKey = relType === 'belongs-to' ? `${fieldName}Id` : '';
-                        relationships.push({
-                            type: relType,
-                            from: entityName,
-                            to: targetEntityName,
-                            relationshipField: fieldName,
-                            foreignKey,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    return relationships;
-}
-
 /**
  * Parse declarative `relations` config into Relationship[] objects.
  *
  * Config format: `{ childTable: { fieldName: 'parentTable' } }`
  * Example: `{ books: { author: 'authors' } }` produces:
- *   - books → authors  (belongs-to, FK = authorId)
+ *   - books → authors  (belongs-to, FK = author_id)
  *   - authors → books  (one-to-many, inverse, field = 'books')
  */
 export function parseRelationsConfig(
@@ -85,7 +37,7 @@ export function parseRelationsConfig(
                     from: fromTable,
                     to: toTable,
                     relationshipField: fieldName,
-                    foreignKey: `${fieldName}Id`,
+                    foreignKey: `${fieldName}_id`,
                 });
                 added.add(btKey);
             }
@@ -108,20 +60,10 @@ export function parseRelationsConfig(
     return relationships;
 }
 
-/** Check if a schema field is a z.lazy() relationship */
-export function isRelationshipField(schema: z.ZodType<any>, key: string): boolean {
-    let fieldSchema = asZodObject(schema).shape[key];
-    if (fieldSchema instanceof z.ZodOptional) {
-        fieldSchema = fieldSchema._def.innerType;
-    }
-    return fieldSchema instanceof z.ZodLazy;
-}
-
 /**
  * Check if a field is a relationship based on the relationships array.
- * Used for config-based relations where the field doesn't exist in the schema.
  */
-export function isRelationshipFieldByConfig(
+export function isRelationshipField(
     entityName: string,
     key: string,
     relationships: Relationship[],
@@ -131,10 +73,10 @@ export function isRelationshipFieldByConfig(
     );
 }
 
-/** Get storable (non-relationship, non-id) fields from a schema */
+/** Get storable (non-id) fields from a schema */
 export function getStorableFields(schema: z.ZodType<any>): { name: string; type: ZodType }[] {
     return Object.entries(asZodObject(schema).shape)
-        .filter(([key]) => key !== 'id' && !isRelationshipField(schema, key))
+        .filter(([key]) => key !== 'id')
         .map(([name, type]) => ({ name, type: type as ZodType }));
 }
 
@@ -189,44 +131,26 @@ export function transformFromStorage(row: Record<string, any>, schema: z.ZodType
     return transformed;
 }
 
-/** Strip z.lazy() fields from data, converting relationship objects to FK IDs */
-export function preprocessRelationshipFields(schema: z.ZodType<any>, data: Record<string, any>): Record<string, any> {
-    const processedData = { ...data };
-    for (const [key, value] of Object.entries(data)) {
-        if (isRelationshipField(schema, key)) {
-            if (value && typeof value === 'object' && 'id' in value) {
-                processedData[`${key}Id`] = value.id;
-                delete processedData[key];
-            } else if (typeof value === 'string') {
-                processedData[`${key}Id`] = value;
-                delete processedData[key];
-            }
-        }
-    }
-    return processedData;
-}
-
 /**
- * Preprocess relationship fields using the relationships array (config-based).
- * Converts entity references to FK values, e.g. { author: tolstoy } → { authorId: 1 }
+ * Preprocess relationship fields using the relationships array.
+ * Converts entity references to FK values: { author: tolstoy } → { author_id: 1 }
  */
-export function preprocessRelationshipFieldsByConfig(
+export function preprocessRelationshipFields(
     entityName: string,
     data: Record<string, any>,
     relationships: Relationship[],
 ): Record<string, any> {
     const processedData = { ...data };
     for (const [key, value] of Object.entries(data)) {
-        if (isRelationshipFieldByConfig(entityName, key, relationships)) {
+        if (isRelationshipField(entityName, key, relationships)) {
             if (value && typeof value === 'object' && 'id' in value) {
-                processedData[`${key}Id`] = value.id;
+                processedData[`${key}_id`] = value.id;
                 delete processedData[key];
             } else if (typeof value === 'number') {
-                processedData[`${key}Id`] = value;
+                processedData[`${key}_id`] = value;
                 delete processedData[key];
             }
         }
     }
     return processedData;
 }
-

@@ -4,7 +4,7 @@
  * Demonstrates all core features in a single runnable file:
  *  - Schema definition with Zod validation & defaults
  *  - Config-based relations (no z.lazy, no interfaces!)
- *  - Insert, get, find, all (CRUD)
+ *  - Insert + select() queries (CRUD)
  *  - Query operators ($gt, $in, $ne, $lt, $gte, $or)
  *  - Lazy navigation: book.author(), author.books()
  *  - Entity references in insert & WHERE
@@ -48,18 +48,18 @@ const db = new Database(':memory:', {
     authors: AuthorSchema,
     books: BookSchema,
 }, {
-    // Declare relationships via config — ORM auto-creates FK columns, lazy nav, etc.
+    // books: { author: 'authors' } → books gets an author_id FK column
     relations: {
-        books: { author: 'authors' },  // books.author → authors (belongs-to, FK = authorId)
+        books: { author: 'authors' },
     },
     indexes: {
         users: ['email', ['name', 'role']],
-        books: ['authorId', 'year'],
+        books: ['author_id', 'year'],
     },
 });
 
 // =============================================================================
-// 3. CRUD — Insert, Get, Find, All, Update, Delete
+// 3. CRUD — Insert, select().get(), select().all(), Update, Delete
 // =============================================================================
 
 console.log('── 1. CRUD ──');
@@ -69,23 +69,23 @@ const bob = db.users.insert({ name: 'Bob', email: 'bob@example.com', score: 75 }
 const carol = db.users.insert({ name: 'Carol', email: 'carol@example.com', score: 42 });
 console.log('Inserted:', alice.name, bob.name, carol.name);
 
-// .get() — single row
-const found = db.users.get(1);
+// select().get() — single row
+const found = db.users.select().where({ id: 1 }).get();
 console.log('Get by ID:', found?.name); // → 'Alice'
-const admin = db.users.get({ role: 'admin' });
+const admin = db.users.select().where({ role: 'admin' }).get();
 console.log('Get by filter:', admin?.name); // → 'Alice'
 
-// .find() — array of matching rows
-const members = db.users.find({ role: 'member' });
-console.log('Find members:', members.map(u => u.name)); // → ['Bob', 'Carol']
+// select().where().all() — array of matching rows
+const members = db.users.select().where({ role: 'member' }).all();
+console.log('Find members:', members.map((u: any) => u.name)); // → ['Bob', 'Carol']
 
-// .all() — every row
-const everyone = db.users.all();
-console.log('All users:', everyone.map(u => u.name)); // → ['Alice', 'Bob', 'Carol']
+// select().all() — every row
+const everyone = db.users.select().all();
+console.log('All users:', everyone.map((u: any) => u.name)); // → ['Alice', 'Bob', 'Carol']
 
 // Update
 alice.update({ score: 200 });
-console.log('Updated score:', db.users.get(1)?.score);
+console.log('Updated score:', db.users.select().where({ id: 1 }).get()?.score);
 
 // Fluent update with WHERE
 const affected = db.users.update({ score: 0 }).where({ role: 'member' }).exec();
@@ -93,7 +93,7 @@ console.log('Reset member scores:', affected, 'rows');
 
 // Delete
 db.users.delete(carol.id);
-console.log('After delete, total:', db.users.all().length);
+console.log('After delete, total:', db.users.select().count());
 
 // =============================================================================
 // 4. FLUENT QUERIES — select() + $or
@@ -105,13 +105,13 @@ const topScorers = db.users.select()
     .where({ score: { $gt: 0 } })
     .orderBy('score', 'desc')
     .all();
-console.log('Top scorers:', topScorers.map(u => `${u.name}: ${u.score}`));
+console.log('Top scorers:', topScorers.map((u: any) => `${u.name}: ${u.score}`));
 
 // $or — find admins OR high scorers
 const adminsOrHighScore = db.users.select()
     .where({ $or: [{ role: 'admin' }, { score: { $gt: 50 } }] })
     .all();
-console.log('Admins or high scorers:', adminsOrHighScore.map(u => `${u.name} (${u.role}, ${u.score})`));
+console.log('Admins or high scorers:', adminsOrHighScore.map((u: any) => `${u.name} (${u.role}, ${u.score})`));
 
 // =============================================================================
 // 5. RELATIONSHIPS — entity references in insert & WHERE
@@ -123,22 +123,22 @@ const tolstoy = db.authors.insert({ name: 'Leo Tolstoy', country: 'Russia' });
 const dostoevsky = db.authors.insert({ name: 'Fyodor Dostoevsky', country: 'Russia' });
 const kafka = db.authors.insert({ name: 'Franz Kafka', country: 'Czech Republic' });
 
-// Insert with entity reference — ORM auto-resolves to FK
+// Insert with entity reference — ORM auto-resolves to author_id FK
 db.books.insert({ title: 'War and Peace', year: 1869, pages: 1225, author: tolstoy } as any);
 db.books.insert({ title: 'Anna Karenina', year: 1878, pages: 864, author: tolstoy } as any);
 db.books.insert({ title: 'Crime and Punishment', year: 1866, pages: 671, author: dostoevsky } as any);
 db.books.insert({ title: 'The Brothers Karamazov', year: 1880, pages: 796, author: dostoevsky } as any);
 db.books.insert({ title: 'The Trial', year: 1925, pages: 255, author: kafka } as any);
 
-console.log(`Seeded ${db.authors.all().length} authors, ${db.books.all().length} books`);
+console.log(`Seeded ${db.authors.select().count()} authors, ${db.books.select().count()} books`);
 
-// .find() with entity reference
-const tolstoyBooks = db.books.find({ author: tolstoy } as any);
-console.log('Tolstoy books (.find):', tolstoyBooks.map(b => b.title));
+// select().where() with entity reference
+const tolstoyBooks = db.books.select().where({ author: tolstoy } as any).all();
+console.log('Tolstoy books:', tolstoyBooks.map((b: any) => b.title));
 
-// .get() with entity reference
-const firstDostoevsky = db.books.get({ author: dostoevsky } as any);
-console.log('First Dostoevsky (.get):', firstDostoevsky?.title);
+// select().where().get() with entity reference
+const firstDostoevsky = db.books.select().where({ author: dostoevsky } as any).get();
+console.log('First Dostoevsky:', firstDostoevsky?.title);
 
 // =============================================================================
 // 6. LAZY NAVIGATION — book.author(), author.books()
@@ -147,7 +147,7 @@ console.log('First Dostoevsky (.get):', firstDostoevsky?.title);
 console.log('\n── 4. Lazy Navigation ──');
 
 // belongs-to: book → author
-const warAndPeace = db.books.get({ title: 'War and Peace' })!;
+const warAndPeace = db.books.select().where({ title: 'War and Peace' }).get()!;
 const bookAuthor = warAndPeace.author();
 console.log(`"${warAndPeace.title}" by ${bookAuthor.name} (${bookAuthor.country})`);
 
@@ -156,7 +156,7 @@ const dostoevskyBooks = dostoevsky.books();
 console.log(`Dostoevsky's books: ${dostoevskyBooks.map((b: any) => b.title).join(', ')}`);
 
 // Chain: get author, then their books
-const kafkaEntity = db.authors.get({ name: 'Franz Kafka' })!;
+const kafkaEntity = db.authors.select().where({ name: 'Franz Kafka' }).get()!;
 const kafkaBooks = kafkaEntity.books();
 console.log(`Kafka's books: ${kafkaBooks.map((b: any) => b.title).join(', ')}`);
 
@@ -211,14 +211,14 @@ for (const row of russianBooks) {
 console.log('\n── 7. Upsert & Transactions ──');
 
 db.users.upsert({ email: 'bob@example.com' }, { name: 'Bob', email: 'bob@example.com', role: 'moderator', score: 80 });
-console.log('Bob after upsert:', db.users.get({ email: 'bob@example.com' })?.role);
+console.log('Bob after upsert:', db.users.select().where({ email: 'bob@example.com' }).get()?.role);
 
 db.transaction(() => {
     db.users.insert({ name: 'Eve', email: 'eve@example.com', role: 'member', score: 50 });
     db.users.update({ score: 999 }).where({ name: 'Alice' }).exec();
 });
-console.log('After transaction — Alice score:', db.users.get({ name: 'Alice' })?.score);
-console.log('After transaction — Eve exists:', !!db.users.get({ name: 'Eve' }));
+console.log('After transaction — Alice score:', db.users.select().where({ name: 'Alice' }).get()?.score);
+console.log('After transaction — Eve exists:', !!db.users.select().where({ name: 'Eve' }).get());
 
 // =============================================================================
 // 10. SCHEMA VALIDATION

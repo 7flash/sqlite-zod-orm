@@ -20,20 +20,18 @@ export type DatabaseOptions = {
     /** Index definitions per table: { tableName: ['col1', ['col2', 'col3']] } */
     indexes?: Record<string, IndexDef[]>;
     /**
-     * Declare relationships via config — no z.lazy() or interfaces needed.
+     * Declare relationships between tables.
      *
      * Format: `{ childTable: { fieldName: 'parentTable' } }`
      *
-     * Example:
-     * ```
-     * relations: {
-     *   books: { author: 'authors' },   // books has belongs-to author
-     *   comments: { post: 'posts' },     // comments has belongs-to post
-     * }
-     * ```
+     * `books: { author: 'authors' }` means the books table will have
+     * an `author_id` column with a foreign key to the authors table.
      *
-     * The ORM auto-creates FK columns (authorId), inverse one-to-many, lazy navigation, and entity refs.
-     * Can be used alongside z.lazy() — both are supported.
+     * The ORM auto-creates:
+     * - FK column (`author_id INTEGER REFERENCES authors(id)`)
+     * - Inverse one-to-many (`author.books()`)
+     * - Lazy navigation (`book.author()`)
+     * - Entity ref support in insert/where (`{ author: tolstoy }`)
      */
     relations?: Record<string, Record<string, string>>;
 };
@@ -71,9 +69,6 @@ export type UpdateBuilder<T> = {
 
 export type EntityAccessor<S extends z.ZodType<any>> = {
     insert: (data: EntityData<S>) => AugmentedEntity<S>;
-    get: (conditions: number | Partial<InferSchema<S>>) => AugmentedEntity<S> | null;
-    find: (conditions?: Partial<InferSchema<S>>) => AugmentedEntity<S>[];
-    all: () => AugmentedEntity<S>[];
     update: ((id: number, data: Partial<EntityData<S>>) => AugmentedEntity<S> | null) & ((data: Partial<EntityData<S>>) => UpdateBuilder<AugmentedEntity<S>>);
     upsert: (conditions?: Partial<InferSchema<S>>, data?: Partial<InferSchema<S>>) => AugmentedEntity<S>;
     delete: (id: number) => void;
@@ -103,10 +98,9 @@ export type ColumnRef = ColumnNode & string;
 /**
  * Full proxy column map for a schema type T.
  * Declared fields get autocomplete; the index signature allows any runtime column
- * (e.g. FK fields like `authorId`) to be accessed without errors.
+ * (e.g. FK fields like `author_id`) to be accessed without errors.
  */
 export type ProxyColumns<T> = Required<{ [K in keyof T]: ColumnRef }> & {
     id: ColumnRef;
     [k: string]: ColumnRef;
 };
-

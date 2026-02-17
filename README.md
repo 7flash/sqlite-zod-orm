@@ -20,13 +20,15 @@ const db = new Database(':memory:', {
 });
 
 const alice = db.users.insert({ name: 'Alice', email: 'alice@example.com', role: 'admin' });
+const admin = db.users.select().where({ role: 'admin' }).get();  // single row
+const all   = db.users.select().all();                           // all rows
 ```
 
 ---
 
 ## Defining Relationships
 
-Declare relationships in the constructor options — no `z.lazy()` or interface boilerplate needed:
+Declare relationships in the constructor options — clean schemas, no boilerplate:
 
 ```typescript
 const AuthorSchema = z.object({ name: z.string(), country: z.string() });
@@ -37,40 +39,43 @@ const db = new Database(':memory:', {
   books: BookSchema,
 }, {
   relations: {
-    books: { author: 'authors' },   // books.author → authors (belongs-to)
+    books: { author: 'authors' },
   },
 });
 ```
 
-**That's it.** The ORM automatically:
-- Creates `authorId` FK column on `books`
+`books: { author: 'authors' }` means the **books** table will have an **`author_id`** column with a foreign key to the **authors** table.
+
+The ORM automatically:
+- Creates `author_id INTEGER REFERENCES authors(id)` column on `books`
 - Infers the inverse `authors → books` (one-to-many)
 - Enables lazy navigation: `book.author()`, `author.books()`
 - Enables entity references in insert/where: `{ author: tolstoy }`
 - Enables fluent joins: `db.books.select().join(db.authors).all()`
 
-> **Note:** `z.lazy()` is still supported for backwards compatibility, but the `relations` config is recommended for cleaner schemas.
-
 ---
 
-## Reading Data — Four Ways
+## Querying — `select()` is the only path
 
-### `.get(id | filter)` — Single Row
-
-```typescript
-const user = db.users.get(1);                     // by ID
-const admin = db.users.get({ role: 'admin' });     // by filter
-```
-
-### `.find(filter?)` — Array of Matching Rows
+All queries go through `select()`:
 
 ```typescript
-const members = db.users.find({ role: 'member' });
-const everyone = db.users.find();                  // all rows
-const all = db.users.all();                        // shorthand
+// Single row
+const user = db.users.select().where({ id: 1 }).get();
+
+// All matching rows
+const admins = db.users.select().where({ role: 'admin' }).all();
+
+// All rows
+const everyone = db.users.select().all();
+
+// Count
+const count = db.users.select().count();
 ```
 
-### `.select()` — Fluent Query Builder
+### Operators
+
+`$gt` `$gte` `$lt` `$lte` `$ne` `$in`
 
 ```typescript
 const topScorers = db.users.select()
@@ -80,9 +85,7 @@ const topScorers = db.users.select()
   .all();
 ```
 
-**Operators:** `$gt` `$gte` `$lt` `$lte` `$ne` `$in`
-
-#### `$or` — Disjunctive Filters
+### `$or`
 
 ```typescript
 const results = db.users.select()
@@ -96,7 +99,7 @@ const alive = db.trees.select()
 // → WHERE alive = 1 AND (name = 'Oak' OR name = 'Elm')
 ```
 
-#### Fluent Join
+### Fluent Join
 
 Auto-infers foreign keys from relationships:
 
@@ -134,12 +137,11 @@ Pass entities directly in `insert()` and `where()` — the ORM resolves to forei
 ```typescript
 const tolstoy = db.authors.insert({ name: 'Leo Tolstoy', country: 'Russia' });
 
-// Insert — entity resolves to FK
+// Insert — entity resolves to author_id FK
 db.books.insert({ title: 'War and Peace', year: 1869, author: tolstoy });
 
 // WHERE — entity resolves to FK condition
-const books = db.books.find({ author: tolstoy });
-const first = db.books.get({ author: tolstoy });
+const books = db.books.select().where({ author: tolstoy }).all();
 ```
 
 ## Lazy Navigation
@@ -148,7 +150,7 @@ Relationship fields become callable methods on returned entities:
 
 ```typescript
 // belongs-to: book → author
-const book = db.books.get({ title: 'War and Peace' })!;
+const book = db.books.select().where({ title: 'War and Peace' }).get()!;
 const author = book.author();       // → { name: 'Leo Tolstoy', ... }
 
 // one-to-many: author → books
@@ -167,9 +169,10 @@ const allByAuthor = book.author().books();
 const user = db.users.insert({ name: 'Alice', role: 'admin' });
 
 // Read
-const found = db.users.get(1);
-const admins = db.users.find({ role: 'admin' });
-const all = db.users.all();
+const one   = db.users.select().where({ id: 1 }).get();
+const some  = db.users.select().where({ role: 'admin' }).all();
+const all   = db.users.select().all();
+const count = db.users.select().count();
 
 // Entity-level update
 user.update({ role: 'superadmin' });
@@ -192,7 +195,7 @@ db.users.delete(1);
 Setting a property on an entity auto-updates the DB:
 
 ```typescript
-const alice = db.users.get(1)!;
+const alice = db.users.select().where({ id: 1 }).get()!;
 alice.score = 200;    // → UPDATE users SET score = 200 WHERE id = 1
 ```
 
@@ -214,7 +217,7 @@ db.users.insert({ name: '', email: 'bad', age: -1 });  // throws ZodError
 const db = new Database(':memory:', schemas, {
   indexes: {
     users: ['email', ['name', 'role']],
-    books: ['authorId', 'year'],
+    books: ['author_id', 'year'],
   },
 });
 ```
@@ -250,7 +253,7 @@ unsub();
 
 ```bash
 bun examples/example.ts    # comprehensive demo
-bun test                    # 90 tests
+bun test                    # 91 tests
 ```
 
 ---
@@ -260,12 +263,11 @@ bun test                    # 90 tests
 | Method | Description |
 |---|---|
 | `new Database(path, schemas, options?)` | Create database with Zod schemas |
-| **Reading** | |
-| `db.table.get(id \| filter)` | Single row by ID or filter |
-| `db.table.find(filter?)` | Array of matching rows |
-| `db.table.all()` | All rows |
-| `db.table.select(...cols?)` | Fluent query builder |
-| `db.table.select().where({ $or: [...] })` | OR conditions |
+| **Querying** | |
+| `db.table.select(...cols?).where(filter).get()` | Single row |
+| `db.table.select(...cols?).where(filter).all()` | Array of rows |
+| `db.table.select().all()` | All rows |
+| `db.table.select().where({ $or: [...] }).all()` | OR conditions |
 | `db.table.select().join(db.other, cols?).all()` | Fluent join (auto FK) |
 | `db.table.select().count()` | Count rows |
 | `db.query(c => { ... })` | Proxy callback (SQL-like JOINs) |

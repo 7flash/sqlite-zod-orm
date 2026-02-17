@@ -147,22 +147,24 @@ test('compileProxyQuery: relationship field auto-resolves to FK column', () => {
     const { z } = require('zod');
 
     const UserSchema = z.object({ name: z.string() });
-    const PostSchema = z.object({
-        title: z.string(),
-        user: z.lazy(() => UserSchema).optional(),
-    });
+    const PostSchema = z.object({ title: z.string() });
 
     const schemas: any = {
         users: UserSchema,
         posts: PostSchema,
     };
 
-    const { proxy, aliasMap } = createContextProxy(schemas);
+    // Config-based relationship: posts.user → users
+    const relationships = [
+        { type: 'belongs-to' as const, from: 'posts', to: 'users', relationshipField: 'user', foreignKey: 'user_id' },
+    ];
+
+    const { proxy, aliasMap } = createContextProxy(schemas, relationships);
     const u = (proxy as any).users;
     const p = (proxy as any).posts;
 
-    // p.user should resolve to 'userId' column (not 'user')
-    expect(p.user.column).toBe('userId');
+    // p.user should resolve to 'user_id' column (not 'user')
+    expect(p.user.column).toBe('user_id');
 
     const { sql } = compileProxyQuery(
         {
@@ -172,5 +174,6 @@ test('compileProxyQuery: relationship field auto-resolves to FK column', () => {
         aliasMap,
     );
     expect(sql).toContain('JOIN');
-    expect(sql).toContain('"userId"');
+    expect(sql).toContain('"user_id"');
 });
+

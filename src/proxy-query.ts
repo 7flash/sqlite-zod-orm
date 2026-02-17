@@ -1,50 +1,48 @@
-import type { z } from 'zod';
+/**
+ * proxy-query.ts — Proxy-based SQL query builder
+ *
+ * Enables db.query(c => { const { users: u, posts: p } = c; ... }) syntax.
+ * Table/column access through the proxy creates ColumnNode AST nodes,
+ * which are then compiled into parameterized SQL.
+ */
+
+import { z } from 'zod';
 import type { Relationship } from './types';
 
-// ---------- SQL Identifier Quoting ----------
+// ---------- Column Node ----------
 
-/** Quote an identifier (table name, alias, column) to handle reserved words. */
+/**
+ * Represents a reference to a specific table column with an alias.
+ * Used as a building block for SQL query construction.
+ */
+export class ColumnNode {
+    readonly _type = 'COL' as const;
+    constructor(
+        readonly table: string,
+        readonly column: string,
+        readonly alias: string,
+    ) { }
+
+    /** Quoted alias.column for use as computed property key */
+    toString(): string {
+        return `"${this.alias}"."${this.column}"`;
+    }
+
+    [Symbol.toPrimitive](): string {
+        return this.toString();
+    }
+}
+
+// ---------- SQL Quoting Helpers ----------
+
+/** Quote an identifier with double quotes */
 function q(name: string): string {
     return `"${name}"`;
 }
 
-/** Quote a fully qualified alias.column reference. */
+/** Quote a fully qualified reference: alias.column */
 function qRef(alias: string, column: string): string {
-    return `${q(alias)}.${q(column)}`;
-}
-
-// ---------- AST Node Types ----------
-
-/** Represents a column reference in the query AST. */
-export class ColumnNode {
-    readonly _type = 'COL' as const;
-    readonly table: string;
-    readonly column: string;
-    readonly alias: string;
-
-    constructor(table: string, column: string, alias: string) {
-        this.table = table;
-        this.column = column;
-        this.alias = alias;
-    }
-
-    /** 
-     * When used as object key via `[t.id]`, JS calls toString().
-     * This returns the qualified column name for the ORM to parse.
-     */
-    toString(): string {
-        return `${q(this.alias)}.${q(this.column)}`;
-    }
-
-    /** Also override valueOf for numeric contexts. */
-    valueOf(): string {
-        return this.toString();
-    }
-
-    /** Convenience for Symbol.toPrimitive */
-    [Symbol.toPrimitive](hint: string): string {
-        return this.toString();
-    }
+    return `"${alias}"."${column}"`;
 }
 
 // ---------- Table Proxy ----------
@@ -52,7 +50,7 @@ export class ColumnNode {
 /**
  * Creates a proxy representing a table with a given alias.
  * Property access returns ColumnNode objects.
- * Relationship fields (z.lazy) are auto-resolved to FK column names.
+ * Relationship fields are auto-resolved to FK column names (field → field_id).
  */
 function createTableProxy(
     tableName: string,
@@ -65,8 +63,8 @@ function createTableProxy(
             if (prop === Symbol.toPrimitive as any || prop === 'toString' || prop === 'valueOf') {
                 return undefined;
             }
-            // Resolve relationship fields: b.author → ColumnNode for 'authorId'
-            const column = relationshipFields.has(prop) ? `${prop}Id` : prop;
+            // Resolve relationship fields: b.author → ColumnNode for 'author_id'
+            const column = relationshipFields.has(prop) ? `${prop}_id` : prop;
             return new ColumnNode(tableName, column, alias);
         },
         ownKeys() {
@@ -74,7 +72,7 @@ function createTableProxy(
         },
         getOwnPropertyDescriptor(_target, prop) {
             if (columns.has(prop as string)) {
-                const column = relationshipFields.has(prop as string) ? `${prop as string}Id` : prop as string;
+                const column = relationshipFields.has(prop as string) ? `${prop as string}_id` : prop as string;
                 return { configurable: true, enumerable: true, value: new ColumnNode(tableName, column, alias) };
             }
             return undefined;
@@ -111,22 +109,8 @@ export function createContextProxy(
                 : {};
             const columns = new Set(Object.keys(shape));
 
-            // Detect relationship fields from BOTH z.lazy() and config-based relations
+            // Detect relationship fields from config-based relations
             const relationshipFields = new Set<string>();
-
-            // 1. z.lazy() introspection
-            for (const [key, fieldSchema] of Object.entries(shape)) {
-                let inner: any = fieldSchema;
-                if (inner?._def?.typeName === 'ZodOptional') inner = inner._def.innerType;
-                if (inner?._def?.typeName === 'ZodLazy') {
-                    const resolved = inner._def.getter();
-                    if (resolved?._def?.typeName !== 'ZodArray') {
-                        relationshipFields.add(key);
-                    }
-                }
-            }
-
-            // 2. Config-based relations
             for (const rel of relationships) {
                 if (rel.from === tableName && rel.type === 'belongs-to') {
                     relationshipFields.add(rel.relationshipField);
@@ -205,7 +189,6 @@ export function compileProxyQuery(
     }
 
     // ---------- FROM / JOIN ----------
-    // First table in aliases is the primary; rest are joined
     const allAliases = [...tablesUsed.values()];
     if (allAliases.length === 0) throw new Error('No tables referenced in query.');
 
@@ -219,13 +202,11 @@ export function compileProxyQuery(
             : [queryResult.join as [ColumnNode, ColumnNode]];
 
         for (const [left, right] of joins) {
-            // Determine which side is the joined table (not the primary)
             const leftTable = tablesUsed.get(left.alias);
             const rightTable = tablesUsed.get(right.alias);
 
             if (!leftTable || !rightTable) throw new Error('Join references unknown table alias.');
 
-            // The non-primary side needs a JOIN clause
             const joinAlias = leftTable.alias === primaryAlias.alias ? rightTable : leftTable;
 
             sql += ` JOIN ${q(joinAlias.tableName)} ${q(joinAlias.alias)} ON ${qRef(left.alias, left.column)} = ${qRef(right.alias, right.column)}`;
@@ -237,21 +218,17 @@ export function compileProxyQuery(
         const whereParts: string[] = [];
 
         for (const [key, value] of Object.entries(queryResult.where)) {
-            // The key could be '"t1"."column"' (from toString trick) or a plain string
             let fieldRef: string;
 
             // Match quoted alias.column pattern: "alias"."column"
             const quotedMatch = key.match(/^"([^"]+)"\."([^"]+)"$/);
             if (quotedMatch && tablesUsed.has(quotedMatch[1]!)) {
-                // Already fully quoted
                 fieldRef = key;
             } else {
-                // Plain field name — use the first table
                 fieldRef = qRef(primaryAlias.alias, key);
             }
 
             if (isColumnNode(value)) {
-                // Column-to-column comparison
                 whereParts.push(`${fieldRef} = ${qRef(value.alias, value.column)}`);
             } else if (Array.isArray(value)) {
                 if (value.length === 0) {
@@ -262,7 +239,6 @@ export function compileProxyQuery(
                     params.push(...value);
                 }
             } else if (typeof value === 'object' && value !== null && !(value instanceof Date)) {
-                // Operator object like { $gt: 5 }
                 for (const [op, operand] of Object.entries(value)) {
                     if (op === '$in') {
                         const arr = operand as any[];
@@ -333,7 +309,7 @@ export function compileProxyQuery(
 
 /**
  * The main `db.query(c => {...})` entry point.
- * 
+ *
  * @param schemas The schema map for all registered tables.
  * @param callback The user's query callback that receives the context proxy.
  * @param executor A function that runs the compiled SQL and returns rows.

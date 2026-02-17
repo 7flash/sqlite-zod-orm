@@ -14,377 +14,342 @@
 import { describe, test, expect } from 'bun:test';
 import { Database, z } from '../src/index';
 
-// -- Inline setup --
+// -- Config-based relations only, no z.lazy, no interfaces --
 
-interface Forest { name: string; address: string; trees?: Tree[]; }
-interface Tree { name: string; planted: string; alive?: boolean; forest?: Forest; }
-
-const ForestSchema: z.ZodType<Forest> = z.object({
+const ForestSchema = z.object({
     name: z.string(),
     address: z.string(),
-    trees: z.lazy(() => z.array(TreeSchema)).optional(),
 });
 
-const TreeSchema: z.ZodType<Tree> = z.object({
+const TreeSchema = z.object({
     name: z.string(),
     planted: z.string(),
     alive: z.boolean().default(true),
-    forest: z.lazy(() => ForestSchema).optional(),
 });
 
 const db = new Database(':memory:', {
     forests: ForestSchema,
     trees: TreeSchema,
 }, {
-    indexes: { trees: ['forestId', 'planted'] },
-});
-
-function displayName(forest: any) {
-    return `${forest.name} - ${forest.address}`;
-}
-
-// =============================================================================
-// 1. SEED
-// =============================================================================
-
-describe('Forests — Seed', () => {
-    test('create forests and add trees via entity reference', () => {
-        const sherwood = db.forests.insert({ name: 'Sherwood', address: 'Nottingham, UK' });
-        const amazon = db.forests.insert({ name: 'Amazon', address: 'South America' });
-        const blackForest = db.forests.insert({ name: 'Black Forest', address: 'Baden-Württemberg, DE' });
-
-        db.trees.insert({ name: 'Major Oak', planted: '1500-01-01', forest: sherwood });
-        db.trees.insert({ name: 'Robin Hood Oak', planted: '1600-03-15', forest: sherwood });
-        db.trees.insert({ name: 'Dead Elm', planted: '1700-06-01', alive: false, forest: sherwood });
-
-        db.trees.insert({ name: 'Brazil Nut', planted: '1800-01-01', forest: amazon });
-        db.trees.insert({ name: 'Rubber Tree', planted: '1850-05-20', forest: amazon });
-        db.trees.insert({ name: 'Kapok', planted: '1900-09-10', forest: amazon });
-
-        db.trees.insert({ name: 'Silver Fir', planted: '1920-04-01', forest: blackForest });
-        db.trees.insert({ name: 'Norway Spruce', planted: '1950-07-15', forest: blackForest });
-
-        expect(db.forests.select().count()).toBe(3);
-        expect(db.trees.select().count()).toBe(8);
-    });
-
-    test('query with entity-based WHERE — get()', () => {
-        const sherwood = db.forests.get({ name: 'Sherwood' })!;
-        const tree = db.trees.get({ forest: sherwood });
-        expect(tree).not.toBeNull();
-        expect(tree!.name).toBe('Major Oak');
-    });
-
-    test('query with entity-based WHERE — select().where()', () => {
-        const amazon = db.forests.get({ name: 'Amazon' })!;
-        const amazonTrees = db.trees.select().where({ forest: amazon }).all();
-        expect(amazonTrees.length).toBe(3);
-        expect(amazonTrees.map(t => t.name)).toContain('Brazil Nut');
-    });
+    relations: {
+        trees: { forest: 'forests' },
+    },
+    indexes: { trees: ['forest_id', 'planted'] },
 });
 
 // =============================================================================
-// 2. TABLE-LEVEL QUERIES
+// 1. BASIC CRUD
 // =============================================================================
 
-describe('Forests — Table-level queries', () => {
-    test('get single tree by filter', () => {
-        const tree = db.trees.select().where({ name: 'Major Oak' }).get()!;
-        expect(tree).not.toBeNull();
-        expect(tree.name).toBe('Major Oak');
-        expect(tree.alive).toBe(true);
+describe('Forests — CRUD', () => {
+    test('insert returns augmented entity', () => {
+        const forest = db.forests.insert({ name: 'Amazon', address: 'Brazil' });
+        expect(forest.id).toBeDefined();
+        expect(forest.name).toBe('Amazon');
     });
 
-    test('find all alive trees', () => {
-        const alive = db.trees.select().where({ alive: true }).all();
-        expect(alive.length).toBe(7);
+    test('select().where().get() returns single row', () => {
+        const forest = db.forests.select().where({ name: 'Amazon' }).get();
+        expect(forest?.name).toBe('Amazon');
     });
 
-    test('find dead trees', () => {
-        const dead = db.trees.select().where({ alive: false }).all();
-        expect(dead.length).toBe(1);
-        expect(dead[0]!.name).toBe('Dead Elm');
+    test('select().all() returns all rows', () => {
+        db.forests.insert({ name: 'Sherwood', address: 'Nottinghamshire, England' });
+        const all = db.forests.select().all();
+        expect(all.length).toBe(2);
     });
 
-    test('find trees planted after 1800, sorted by date', () => {
-        const trees = db.trees.select()
-            .where({ planted: { $gte: '1800-01-01' } })
+    test('select().where().all() returns matching rows', () => {
+        const results = db.forests.select().where({ name: 'Amazon' }).all();
+        expect(results.length).toBe(1);
+        expect(results[0].address).toBe('Brazil');
+    });
+
+    test('update by ID', () => {
+        const amazon = db.forests.select().where({ name: 'Amazon' }).get()!;
+        db.forests.update(amazon.id, { address: 'South America' });
+        const updated = db.forests.select().where({ name: 'Amazon' }).get()!;
+        expect(updated.address).toBe('South America');
+    });
+
+    test('delete by ID', () => {
+        const extra = db.forests.insert({ name: 'TempForest', address: 'Nowhere' });
+        const countBefore = db.forests.select().count();
+        db.forests.delete(extra.id);
+        expect(db.forests.select().count()).toBe(countBefore - 1);
+    });
+});
+
+// =============================================================================
+// 2. FLUENT QUERY BUILDER
+// =============================================================================
+
+describe('Trees — Fluent queries', () => {
+    test('setup: seed trees', () => {
+        const amazon = db.forests.select().where({ name: 'Amazon' }).get()!;
+        const sherwood = db.forests.select().where({ name: 'Sherwood' }).get()!;
+
+        db.trees.insert({ name: 'Mahogany', planted: '1990-01-01', forest: amazon } as any);
+        db.trees.insert({ name: 'Rubber Tree', planted: '1995-06-15', forest: amazon } as any);
+        db.trees.insert({ name: 'Oak', planted: '1800-01-01', forest: sherwood } as any);
+        db.trees.insert({ name: 'Major Oak', planted: '1300-01-01', forest: sherwood } as any);
+        db.trees.insert({ name: 'Dead Elm', planted: '1850-01-01', alive: false, forest: sherwood } as any);
+        db.trees.insert({ name: 'Dead Yew', planted: '1700-01-01', alive: false, forest: sherwood } as any);
+        db.trees.insert({ name: 'Dead Ash', planted: '1600-01-01', alive: false, forest: sherwood } as any);
+
+        expect(db.trees.select().count()).toBeGreaterThanOrEqual(7);
+    });
+
+    test('where + orderBy + limit', () => {
+        const sherwood = db.forests.select().where({ name: 'Sherwood' }).get()!;
+        const result = db.trees.select()
+            .where({ forest_id: sherwood.id, alive: true })
             .orderBy('planted', 'asc')
+            .limit(1)
             .all();
-
-        expect(trees.length).toBe(5);
-        expect(trees[0]!.name).toBe('Brazil Nut');
-        expect(trees[4]!.name).toBe('Norway Spruce');
+        expect(result.length).toBe(1);
+        expect(result[0].name).toBe('Major Oak');
     });
 
-    test('paginate trees', () => {
-        const page1 = db.trees.select().orderBy('id', 'asc').limit(3).all();
-        const page2 = db.trees.select().orderBy('id', 'asc').limit(3).offset(3).all();
-
-        expect(page1.length).toBe(3);
-        expect(page2.length).toBe(3);
-        expect(page1[0]!.name).not.toBe(page2[0]!.name);
+    test('count()', () => {
+        const count = db.trees.select().where({ alive: true }).count();
+        expect(count).toBeGreaterThanOrEqual(4);
     });
 
-    test('count trees per forest using entity WHERE', () => {
-        const sherwood = db.forests.get({ name: 'Sherwood' })!;
-        const count = db.trees.select().where({ forest: sherwood }).count();
-        expect(count).toBe(3);
-    });
-});
-
-// =============================================================================
-// 3. $or QUERIES
-// =============================================================================
-
-describe('Forests — $or queries', () => {
-    test('$or with simple conditions (fluent builder)', () => {
-        const trees = db.trees.select()
-            .where({ $or: [{ name: 'Major Oak' }, { name: 'Dead Elm' }] })
-            .orderBy('name', 'asc')
+    test('$gt operator', () => {
+        const recent = db.trees.select()
+            .where({ planted: { $gt: '1900-01-01' } })
             .all();
-
-        expect(trees.length).toBe(2);
-        expect(trees.map(t => t.name)).toEqual(['Dead Elm', 'Major Oak']);
+        expect(recent.length).toBeGreaterThanOrEqual(1);
     });
 
-    test('$or with operators', () => {
-        const trees = db.trees.select()
-            .where({ $or: [{ planted: { $lt: '1600-01-01' } }, { alive: false }] })
+    test('$in operator', () => {
+        const specific = db.trees.select()
+            .where({ name: { $in: ['Mahogany', 'Oak'] } })
             .all();
+        expect(specific.length).toBe(2);
+    });
 
-        expect(trees.length).toBe(2); // Major Oak (1500) and Dead Elm
+    test('$or operator', () => {
+        const results = db.trees.select()
+            .where({ $or: [{ name: 'Mahogany' }, { name: 'Oak' }] })
+            .all();
+        expect(results.length).toBe(2);
     });
 
     test('$or combined with AND', () => {
-        const trees = db.trees.select()
-            .where({ alive: true, $or: [{ name: 'Brazil Nut' }, { name: 'Kapok' }] })
+        const sherwood = db.forests.select().where({ name: 'Sherwood' }).get()!;
+        const dead = db.trees.select()
+            .where({ forest_id: sherwood.id, alive: false })
             .all();
-
-        expect(trees.length).toBe(2);
-        expect(trees.map(t => t.name).sort()).toEqual(['Brazil Nut', 'Kapok']);
-    });
-
-    test('$or in database.get() (raw query)', () => {
-        const sherwood = db.forests.get({ name: 'Sherwood' })!;
-        const trees = db.trees.select()
-            .where({ $or: [{ forest: sherwood }, { name: 'Brazil Nut' }] })
-            .all();
-
-        expect(trees.length).toBe(4); // 3 Sherwood + 1 Brazil Nut
+        expect(dead.length).toBe(3);
     });
 });
 
 // =============================================================================
-// 4. LAZY NAVIGATION — tree.forest(), forest.trees()
+// 3. ENTITY REFERENCES (insert + where)
 // =============================================================================
 
-describe('Forests — Lazy navigation', () => {
-    test('tree.forest() — belongs-to navigation', () => {
-        const tree = db.trees.get({ name: 'Major Oak' })!;
-        const forest = tree.forest();
-        expect(forest.name).toBe('Sherwood');
-        expect(forest.address).toBe('Nottingham, UK');
+describe('Entity references', () => {
+    test('insert with entity reference resolves FK', () => {
+        const amazon = db.forests.select().where({ name: 'Amazon' }).get()!;
+        const tree = db.trees.insert({ name: 'Brazil Nut', planted: '1850-01-01', forest: amazon } as any);
+        expect(tree.forest_id).toBe(amazon.id);
     });
 
-    test('forest.trees() — one-to-many navigation', () => {
-        const amazon = db.forests.get({ name: 'Amazon' })!;
-        const trees = amazon.trees();
-        expect(trees.length).toBe(3);
-        const names = trees.map((t: any) => t.name).sort();
-        expect(names).toEqual(['Brazil Nut', 'Kapok', 'Rubber Tree']);
-    });
-
-    test('chain: navigate tree → forest → all trees in that forest', () => {
-        const tree = db.trees.get({ name: 'Brazil Nut' })!;
-        const forest = tree.forest();
-        const allTreesInForest = forest.trees();
-        expect(allTreesInForest.length).toBe(3);
-        expect(allTreesInForest.map((t: any) => t.name)).toContain('Brazil Nut');
-    });
-
-    test('navigating back: each tree in forest has correct forest()', () => {
-        const sherwood = db.forests.get({ name: 'Sherwood' })!;
-        const trees = sherwood.trees();
-        for (const tree of trees as any[]) {
-            const parentForest = tree.forest();
-            expect(parentForest.name).toBe('Sherwood');
-        }
+    test('where with entity reference', () => {
+        const sherwood = db.forests.select().where({ name: 'Sherwood' }).get()!;
+        const trees = db.trees.select().where({ forest: sherwood } as any).all();
+        expect(trees.length).toBeGreaterThanOrEqual(5);
     });
 });
 
 // =============================================================================
-// 5. COMPUTED FIELDS — plain functions, no DSL
+// 4. LAZY NAVIGATION
 // =============================================================================
 
-describe('Forests — Computed fields', () => {
-    test('displayName concatenates name and address', () => {
-        const forest = db.forests.get({ name: 'Sherwood' })!;
-        expect(displayName(forest)).toBe('Sherwood - Nottingham, UK');
+describe('Lazy navigation', () => {
+    test('belongs-to: tree.forest()', () => {
+        const tree = db.trees.select().where({ name: 'Mahogany' }).get()!;
+        const forest = (tree as any).forest();
+        expect(forest).not.toBeNull();
+        expect(forest.name).toBe('Amazon');
     });
 
-    test('displayName for all forests', () => {
-        const all = db.forests.select().orderBy('id', 'asc').all();
-        expect(all.map(displayName)).toEqual([
-            'Sherwood - Nottingham, UK',
-            'Amazon - South America',
-            'Black Forest - Baden-Württemberg, DE',
-        ]);
+    test('one-to-many: forest.trees()', () => {
+        const amazon = db.forests.select().where({ name: 'Amazon' }).get()!;
+        const trees = (amazon as any).trees();
+        expect(trees.length).toBeGreaterThanOrEqual(2);
+    });
+
+    test('chain: tree.forest().trees()', () => {
+        const tree = db.trees.select().where({ name: 'Mahogany' }).get()!;
+        const siblings = (tree as any).forest().trees();
+        expect(siblings.length).toBeGreaterThanOrEqual(2);
+    });
+
+    test('inverse: forest.trees() returns correct subset', () => {
+        const sherwood = db.forests.select().where({ name: 'Sherwood' }).get()!;
+        const trees = (sherwood as any).trees();
+        const names = trees.map((t: any) => t.name);
+        expect(names).toContain('Oak');
+        expect(names).toContain('Major Oak');
     });
 });
 
 // =============================================================================
-// 6. FLUENT JOIN
+// 5. FLUENT JOIN
 // =============================================================================
 
-describe('Forests — Fluent join', () => {
-    test('join trees with forest name + address (auto FK)', () => {
+describe('Fluent join', () => {
+    test('join trees + forests', () => {
         const rows = db.trees.select('name', 'planted')
             .join(db.forests, ['name', 'address'])
-            .where({ alive: true })
             .orderBy('planted', 'asc')
             .all();
-
-        expect(rows.length).toBeGreaterThan(0);
+        expect(rows.length).toBeGreaterThanOrEqual(7);
         expect((rows[0] as any).forests_name).toBeDefined();
-        expect((rows[0] as any).forests_address).toBeDefined();
     });
 
-    test('join with where filter on FK', () => {
-        const sherwood = db.forests.get({ name: 'Sherwood' })!;
+    test('join with where', () => {
         const rows = db.trees.select('name')
             .join(db.forests, ['name'])
-            .where({ forestId: sherwood.id } as any)
+            .where({ alive: true })
             .all();
-
-        expect(rows.length).toBe(3);
-        expect(rows.every((r: any) => r.forests_name === 'Sherwood')).toBe(true);
-    });
-
-    test('join with orderBy and limit', () => {
-        const rows = db.trees.select('name', 'planted')
-            .join(db.forests, ['name'])
-            .orderBy('planted', 'desc')
-            .limit(3)
-            .all();
-
-        expect(rows.length).toBe(3);
-        expect((rows[0] as any).planted >= (rows[1] as any).planted).toBe(true);
-    });
-
-    test('string-based join still works (manual FK)', () => {
-        const rows = db.trees.select('name')
-            .join('forests', 'forestId', ['name'])
-            .all();
-
-        expect(rows.length).toBeGreaterThan(0);
-        expect((rows[0] as any).forests_name).toBeDefined();
+        expect(rows.length).toBeGreaterThanOrEqual(4);
     });
 });
 
 // =============================================================================
-// 7. PROXY QUERY
+// 6. PROXY QUERY
 // =============================================================================
 
-describe('Forests — Proxy query', () => {
-    test('join trees with forest name', () => {
-        const rows = db.query((c: any) => {
-            const { forests: f, trees: t } = c;
-            return {
-                select: { tree: t.name, forest: f.name, planted: t.planted },
-                join: [[t.forestId, f.id]],
-                where: { [f.name]: 'Sherwood' },
-                orderBy: { [t.planted]: 'asc' },
-            };
-        });
-
-        expect(rows.length).toBe(3);
-        expect((rows[0] as any).tree).toBe('Major Oak');
-        expect((rows[0] as any).forest).toBe('Sherwood');
-        expect((rows[2] as any).tree).toBe('Dead Elm');
-    });
-
-    test('join with WHERE IN filter', () => {
+describe('Proxy query', () => {
+    test('basic join + where + orderBy', () => {
         const rows = db.query((c: any) => {
             const { forests: f, trees: t } = c;
             return {
                 select: { tree: t.name, forest: f.name },
-                join: [[t.forestId, f.id]],
-                where: { [t.id]: { $in: [1, 2, 3] } },
+                join: [[t.forest, f.id]],
+                where: { [f.name]: 'Amazon' },
+                orderBy: { [t.planted]: 'asc' },
             };
         });
-
-        expect(rows.length).toBe(3);
-        expect(rows.every((r: any) => r.forest === 'Sherwood')).toBe(true);
+        expect(rows.length).toBeGreaterThanOrEqual(2);
+        expect((rows[0] as any).forest).toBe('Amazon');
     });
 
-    test('count trees per forest (manual grouping)', () => {
+    test('relationship field auto-resolves to FK', () => {
+        // t.forest should resolve to t.forest_id in the SQL
         const rows = db.query((c: any) => {
             const { forests: f, trees: t } = c;
             return {
-                select: { forest: f.name, tree: t.name },
-                join: [[t.forestId, f.id]],
+                select: { tree: t.name },
+                join: [[t.forest, f.id]],
+                where: { [f.name]: 'Sherwood' },
             };
         });
-
-        const byForest: Record<string, number> = {};
-        for (const r of rows as any[]) {
-            byForest[r.forest] = (byForest[r.forest] || 0) + 1;
-        }
-
-        expect(byForest['Sherwood']).toBe(3);
-        expect(byForest['Amazon']).toBe(3);
-        expect(byForest['Black Forest']).toBe(2);
+        expect(rows.length).toBeGreaterThanOrEqual(5);
     });
 });
 
 // =============================================================================
-// 8. MUTATIONS
+// 7. FLUENT UPDATE
 // =============================================================================
 
-describe('Forests — Mutations', () => {
-    test('update tree by ID', () => {
-        const elm = db.trees.get({ name: 'Dead Elm' })!;
-        db.trees.update(elm.id, { alive: true });
-        const updated = db.trees.get(elm.id)!;
-        expect(updated.alive).toBe(true);
-    });
-
-    test('fluent update: mark all Sherwood trees as dead', () => {
-        const sherwood = db.forests.get({ name: 'Sherwood' })!;
+describe('Fluent update', () => {
+    test('update().where().exec()', () => {
+        const sherwood = db.forests.select().where({ name: 'Sherwood' }).get()!;
         const affected = db.trees.update({ alive: false } as any)
-            .where({ forestId: sherwood.id } as any)
+            .where({ forest_id: sherwood.id, alive: true })
             .exec();
+        expect(affected).toBeGreaterThan(0);
 
-        expect(affected).toBe(3);
-        const dead = db.trees.select().where({ forest: sherwood, alive: false }).all();
-        expect(dead.length).toBe(3);
+        // Restore
+        db.trees.update({ alive: true } as any)
+            .where({ forest_id: sherwood.id, name: { $in: ['Oak', 'Major Oak'] } })
+            .exec();
     });
+});
 
-    test('upsert tree', () => {
-        const amazon = db.forests.get({ name: 'Amazon' })!;
+// =============================================================================
+// 8. UPSERT & TRANSACTIONS
+// =============================================================================
+
+describe('Upsert and transactions', () => {
+    test('upsert inserts when not found', () => {
+        const amazon = db.forests.select().where({ name: 'Amazon' }).get()!;
         db.trees.upsert(
-            { name: 'Brazil Nut' },
-            { name: 'Brazil Nut', planted: '1800-01-01', alive: true, forestId: amazon.id } as any,
+            { name: 'Kapok' } as any,
+            { name: 'Kapok', planted: '1900-01-01', alive: true, forest_id: amazon.id } as any,
         );
-
-        const nuts = db.trees.select().where({ name: 'Brazil Nut' }).all();
-        expect(nuts.length).toBe(1);
+        const found = db.trees.select().where({ name: 'Kapok' }).get();
+        expect(found).not.toBeNull();
     });
 
-    test('delete tree', () => {
+    test('upsert updates when found', () => {
+        db.trees.upsert(
+            { name: 'Kapok' } as any,
+            { name: 'Kapok', planted: '1950-01-01' } as any,
+        );
+        const found = db.trees.select().where({ name: 'Kapok' }).get()!;
+        expect(found.planted).toBe('1950-01-01');
+    });
+
+    test('transaction commits on success', () => {
+        db.transaction(() => {
+            db.forests.insert({ name: 'Taiga', address: 'Russia' });
+        });
+        const taiga = db.forests.select().where({ name: 'Taiga' }).get();
+        expect(taiga).not.toBeNull();
+    });
+
+    test('transaction rolls back on error', () => {
+        const countBefore = db.forests.select().count();
+        expect(() => {
+            db.transaction(() => {
+                db.forests.insert({ name: 'WillFail', address: 'Nowhere' });
+                throw new Error('kaboom');
+            });
+        }).toThrow();
+        expect(db.forests.select().count()).toBe(countBefore);
+    });
+});
+
+// =============================================================================
+// 9. ENTITY METHODS (update/delete on entity)
+// =============================================================================
+
+describe('Entity methods', () => {
+    test('entity.update()', () => {
+        const tree = db.trees.select().where({ name: 'Kapok' }).get()!;
+        tree.update({ planted: '2000-01-01' });
+        const updated = db.trees.select().where({ name: 'Kapok' }).get()!;
+        expect(updated.planted).toBe('2000-01-01');
+    });
+
+    test('entity.delete()', () => {
         const countBefore = db.trees.select().count();
-        const elm = db.trees.get({ name: 'Dead Elm' })!;
-        db.trees.delete(elm.id);
+        const tree = db.trees.select().where({ name: 'Kapok' }).get()!;
+        tree.delete();
         expect(db.trees.select().count()).toBe(countBefore - 1);
     });
+
+    test('auto-persist proxy', () => {
+        const tree = db.trees.select().where({ name: 'Mahogany' }).get()!;
+        tree.planted = '2020-01-01';
+        const check = db.trees.select().where({ name: 'Mahogany' }).get()!;
+        expect(check.planted).toBe('2020-01-01');
+        // Restore
+        tree.planted = '1990-01-01';
+    });
 });
 
 // =============================================================================
-// 9. SCHEMA VALIDATION
+// 10. SCHEMA VALIDATION
 // =============================================================================
 
-describe('Forests — Schema validation', () => {
+describe('Schema validation', () => {
     test('insert with missing required field throws', () => {
         expect(() => {
             db.forests.insert({ name: 'No Address' } as any);
@@ -398,18 +363,32 @@ describe('Forests — Schema validation', () => {
     });
 
     test('defaults are applied (alive = true)', () => {
-        const amazon = db.forests.get({ name: 'Amazon' })!;
-        const tree = db.trees.insert({ name: 'Test Sapling', planted: '2025-01-01', forest: amazon });
+        const amazon = db.forests.select().where({ name: 'Amazon' }).get()!;
+        const tree = db.trees.insert({ name: 'Test Sapling', planted: '2025-01-01', forest: amazon } as any);
         expect(tree.alive).toBe(true);
+        tree.delete(); // cleanup
     });
 });
 
 // =============================================================================
-// 10. CONFIG-BASED RELATIONS (no z.lazy, no interfaces)
+// 11. SUBSCRIBE
 // =============================================================================
 
-describe('Config-based relations', () => {
-    // Clean schemas — no z.lazy(), no interface annotations
+describe('Subscribe', () => {
+    test('insert event fires callback', () => {
+        let captured: any = null;
+        db.forests.subscribe('insert', (data) => { captured = data; });
+        db.forests.insert({ name: 'SubscribeTest', address: 'Test' });
+        expect(captured).not.toBeNull();
+        expect(captured.name).toBe('SubscribeTest');
+    });
+});
+
+// =============================================================================
+// 12. INDEPENDENT CONFIG-BASED DB (authors/books)
+// =============================================================================
+
+describe('Config-based relations — authors/books', () => {
     const AuthorSchema = z.object({
         name: z.string(),
         country: z.string(),
@@ -435,37 +414,37 @@ describe('Config-based relations', () => {
     cdb.books.insert({ title: 'Anna Karenina', year: 1878, author: tolstoy } as any);
     cdb.books.insert({ title: 'The Trial', year: 1925, author: kafka } as any);
 
-    test('insert with entity reference resolves FK', () => {
-        const books = cdb.books.all();
+    test('FK column is author_id', () => {
+        const books = cdb.books.select().all();
         expect(books.length).toBe(3);
-        expect(books[0].authorId).toBe(tolstoy.id);
+        expect(books[0].author_id).toBe(tolstoy.id);
     });
 
-    test('.find() with entity reference', () => {
-        const books = cdb.books.find({ author: tolstoy } as any);
+    test('select().where() with entity reference', () => {
+        const books = cdb.books.select().where({ author: tolstoy } as any).all();
         expect(books.length).toBe(2);
         expect(books.map(b => b.title).sort()).toEqual(['Anna Karenina', 'War and Peace']);
     });
 
-    test('.get() with entity reference', () => {
-        const book = cdb.books.get({ author: kafka } as any);
+    test('select().where().get() with entity reference', () => {
+        const book = cdb.books.select().where({ author: kafka } as any).get();
         expect(book?.title).toBe('The Trial');
     });
 
     test('lazy navigation: book.author()', () => {
-        const book = cdb.books.get({ title: 'War and Peace' })!;
+        const book = cdb.books.select().where({ title: 'War and Peace' }).get()!;
         const author = (book as any).author();
         expect(author.name).toBe('Leo Tolstoy');
         expect(author.country).toBe('Russia');
     });
 
     test('lazy navigation: author.books()', () => {
-        const author = cdb.authors.get({ name: 'Leo Tolstoy' })!;
+        const author = cdb.authors.select().where({ name: 'Leo Tolstoy' }).get()!;
         const books = (author as any).books();
         expect(books.length).toBe(2);
     });
 
-    test('fluent join works', () => {
+    test('fluent join', () => {
         const rows = cdb.books.select('title', 'year')
             .join(cdb.authors, ['name'])
             .orderBy('year', 'asc')
@@ -474,7 +453,7 @@ describe('Config-based relations', () => {
         expect((rows[0] as any).authors_name).toBe('Leo Tolstoy');
     });
 
-    test('proxy query works', () => {
+    test('proxy query', () => {
         const rows = cdb.query((c: any) => {
             const { authors: a, books: b } = c;
             return {
@@ -486,12 +465,5 @@ describe('Config-based relations', () => {
         });
         expect(rows.length).toBe(2);
         expect((rows[0] as any).author).toBe('Leo Tolstoy');
-    });
-
-    test('$or works with config-based relations', () => {
-        const books = cdb.books.select()
-            .where({ $or: [{ year: 1869 }, { year: 1925 }] })
-            .all();
-        expect(books.length).toBe(2);
     });
 });

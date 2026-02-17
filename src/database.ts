@@ -16,11 +16,11 @@ import type {
 } from './types';
 import { asZodObject } from './types';
 import {
-    parseRelationships, parseRelationsConfig,
-    isRelationshipField, isRelationshipFieldByConfig,
+    parseRelationsConfig,
+    isRelationshipField,
     getStorableFields,
     zodTypeToSqlType, transformForStorage, transformFromStorage,
-    preprocessRelationshipFields, preprocessRelationshipFieldsByConfig,
+    preprocessRelationshipFields,
 } from './schema';
 
 // =============================================================================
@@ -41,17 +41,7 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
         this.schemas = schemas;
         this.options = options;
         this.subscriptions = { insert: {}, update: {}, delete: {} };
-        // Merge relationships from z.lazy() detection and declarative config
-        const lazyRels = parseRelationships(schemas);
-        const configRels = options.relations ? parseRelationsConfig(options.relations, schemas) : [];
-        // Deduplicate: config rels won't overlap with z.lazy() rels in typical usage
-        const relKeys = new Set(lazyRels.map(r => `${r.from}.${r.relationshipField}:${r.type}`));
-        const mergedRels = [...lazyRels];
-        for (const cr of configRels) {
-            const key = `${cr.from}.${cr.relationshipField}:${cr.type}`;
-            if (!relKeys.has(key)) { mergedRels.push(cr); relKeys.add(key); }
-        }
-        this.relationships = mergedRels;
+        this.relationships = options.relations ? parseRelationsConfig(options.relations, schemas) : [];
         this.initializeTables();
         this.runMigrations();
         if (options.indexes) this.createIndexes(options.indexes);
@@ -62,9 +52,6 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
             const key = entityName as keyof Schemas;
             const accessor: EntityAccessor<Schemas[typeof key]> = {
                 insert: (data) => this.insert(entityName, data),
-                get: (conditions) => this.get(entityName, conditions),
-                find: (conditions) => this.find(entityName, conditions ?? {}),
-                all: () => this.find(entityName, {}),
                 update: (idOrData: any, data?: any) => {
                     if (typeof idOrData === 'number') return this.update(entityName, idOrData, data);
                     return this._createUpdateBuilder(entityName, idOrData);
@@ -204,14 +191,11 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
 
     private insert<T extends Record<string, any>>(entityName: string, data: Omit<T, 'id'>): AugmentedEntity<any> {
         const schema = this.schemas[entityName]!;
-        // Preprocess: convert entity refs → FK IDs (supports both z.lazy() and config-based)
-        let processedData = preprocessRelationshipFields(schema, data as Record<string, any>);
-        processedData = preprocessRelationshipFieldsByConfig(entityName, processedData, this.relationships);
+        const processedData = preprocessRelationshipFields(entityName, data as Record<string, any>, this.relationships);
         const validatedData = asZodObject(schema).passthrough().parse(processedData);
         const storableData = Object.fromEntries(
             Object.entries(validatedData).filter(([key]) =>
-                !isRelationshipField(schema, key) &&
-                !isRelationshipFieldByConfig(entityName, key, this.relationships)
+                !isRelationshipField(entityName, key, this.relationships)
             )
         );
         const transformed = transformForStorage(storableData);
@@ -222,7 +206,7 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
             : `INSERT INTO ${entityName} (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`;
 
         const result = this.db.query(sql).run(...Object.values(transformed));
-        const newEntity = this.get(entityName, result.lastInsertRowid as number);
+        const newEntity = this._getById(entityName, result.lastInsertRowid as number);
         if (!newEntity) throw new Error('Failed to retrieve entity after insertion');
 
         this.emit('insert', entityName, newEntity);
@@ -230,50 +214,40 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
         return newEntity;
     }
 
-    private get<T extends Record<string, any>>(entityName: string, conditions: number | Partial<T>): AugmentedEntity<any> | null {
-        const q = typeof conditions === 'number' ? { id: conditions } : conditions;
-        if (Object.keys(q).length === 0) return null;
-        const results = this.find(entityName, { ...q, $limit: 1 });
-        return results.length > 0 ? results[0] : null;
+    /** Internal: get a single entity by ID (used by insert, update, lazy nav) */
+    private _getById(entityName: string, id: number): AugmentedEntity<any> | null {
+        const row = this.db.query(`SELECT * FROM ${entityName} WHERE id = ?`).get(id) as any;
+        if (!row) return null;
+        return this._attachMethods(entityName, transformFromStorage(row, this.schemas[entityName]!));
     }
 
-    private findOne<T extends Record<string, any>>(entityName: string, conditions: Record<string, any>): AugmentedEntity<any> | null {
-        const results = this.find(entityName, { ...conditions, $limit: 1 });
-        return results.length > 0 ? results[0] : null;
+    /** Internal: get a single entity by conditions */
+    private _getOne(entityName: string, conditions: Record<string, any>): AugmentedEntity<any> | null {
+        const { clause, values } = this.buildWhereClause(conditions);
+        const row = this.db.query(`SELECT * FROM ${entityName} ${clause} LIMIT 1`).get(...values) as any;
+        if (!row) return null;
+        return this._attachMethods(entityName, transformFromStorage(row, this.schemas[entityName]!));
     }
 
-    private find<T extends Record<string, any>>(entityName: string, conditions: Record<string, any> = {}): AugmentedEntity<any>[] {
-        return this.findSimple(entityName, conditions);
-    }
-
-    /** Simple query without includes */
-    private findSimple(entityName: string, conditions: Record<string, any>): any[] {
-        const { $limit, $offset, $sortBy, ...whereConditions } = conditions;
-        const { clause, values } = this.buildWhereClause(whereConditions);
-
-        let sql = `SELECT * FROM ${entityName} ${clause}`;
-        if ($sortBy) {
-            const [field, direction = 'ASC'] = ($sortBy as string).split(':');
-            sql += ` ORDER BY ${field} ${direction.toUpperCase() === 'DESC' ? 'DESC' : 'ASC'}`;
-        }
-        if ($limit) sql += ` LIMIT ${$limit}`;
-        if ($offset) sql += ` OFFSET ${$offset}`;
-
-        const rows = this.db.query(sql).all(...values);
-        const entities = rows.map((row: any) => transformFromStorage(row, this.schemas[entityName]!));
-        return entities.map(entity => this._attachMethods(entityName, entity));
+    /** Internal: find multiple entities by conditions */
+    private _findMany(entityName: string, conditions: Record<string, any> = {}): AugmentedEntity<any>[] {
+        const { clause, values } = this.buildWhereClause(conditions);
+        const rows = this.db.query(`SELECT * FROM ${entityName} ${clause}`).all(...values);
+        return rows.map((row: any) =>
+            this._attachMethods(entityName, transformFromStorage(row, this.schemas[entityName]!))
+        );
     }
 
     private update<T extends Record<string, any>>(entityName: string, id: number, data: Partial<Omit<T, 'id'>>): AugmentedEntity<any> | null {
         const schema = this.schemas[entityName]!;
         const validatedData = asZodObject(schema).partial().parse(data);
         const transformed = transformForStorage(validatedData);
-        if (Object.keys(transformed).length === 0) return this.get(entityName, { id } as any);
+        if (Object.keys(transformed).length === 0) return this._getById(entityName, id);
 
         const setClause = Object.keys(transformed).map(key => `${key} = ?`).join(', ');
         this.db.query(`UPDATE ${entityName} SET ${setClause} WHERE id = ?`).run(...Object.values(transformed), id);
 
-        const updatedEntity = this.get(entityName, { id } as any);
+        const updatedEntity = this._getById(entityName, id);
         if (updatedEntity) {
             this.emit('update', entityName, updatedEntity);
             this.subscriptions.update[entityName]?.forEach(cb => cb(updatedEntity));
@@ -299,7 +273,7 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
 
         const affected = (result as any).changes ?? 0;
         if (affected > 0 && (this.subscriptions.update[entityName]?.length || this.options.changeTracking)) {
-            for (const entity of this.find(entityName, conditions)) {
+            for (const entity of this._findMany(entityName, conditions)) {
                 this.emit('update', entityName, entity);
                 this.subscriptions.update[entityName]?.forEach(cb => cb(entity));
             }
@@ -317,14 +291,13 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
     }
 
     private upsert<T extends Record<string, any>>(entityName: string, data: any, conditions: any = {}): AugmentedEntity<any> {
-        const schema = this.schemas[entityName]!;
-        const processedData = preprocessRelationshipFields(schema, data);
-        const processedConditions = preprocessRelationshipFields(schema, conditions);
+        const processedData = preprocessRelationshipFields(entityName, data ?? {}, this.relationships);
+        const processedConditions = preprocessRelationshipFields(entityName, conditions ?? {}, this.relationships);
         const hasId = processedData.id && typeof processedData.id === 'number';
         const existing = hasId
-            ? this.get(entityName, { id: processedData.id } as any)
+            ? this._getById(entityName, processedData.id)
             : Object.keys(processedConditions).length > 0
-                ? this.get(entityName, processedConditions)
+                ? this._getOne(entityName, processedConditions)
                 : null;
 
         if (existing) {
@@ -338,7 +311,7 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
     }
 
     private delete(entityName: string, id: number): void {
-        const entity = this.get(entityName, { id });
+        const entity = this._getById(entityName, id);
         if (entity) {
             this.db.query(`DELETE FROM ${entityName} WHERE id = ?`).run(id);
             this.emit('delete', entityName, entity);
@@ -363,7 +336,7 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
                 // book.author() → lazy load parent
                 augmented[rel.relationshipField] = () => {
                     const fkValue = entity[rel.foreignKey];
-                    return fkValue ? this.get(rel.to, { id: fkValue }) : null;
+                    return fkValue ? this._getById(rel.to, fkValue) : null;
                 };
             } else if (rel.from === entityName && rel.type === 'one-to-many') {
                 // author.books() → lazy load children
@@ -373,7 +346,7 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
                 if (belongsToRel) {
                     const fk = belongsToRel.foreignKey;
                     augmented[rel.relationshipField] = () => {
-                        return this.find(rel.to, { [fk]: entity.id });
+                        return this._findMany(rel.to, { [fk]: entity.id });
                     };
                 }
             }
@@ -399,17 +372,15 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
 
     /**
      * Transform entity references in conditions to FK values.
-     * e.g. { author: tolstoy } → { authorId: tolstoy.id }
+     * e.g. { author: tolstoy } → { author_id: tolstoy.id }
      */
     private resolveEntityConditions(conditions: Record<string, any>): Record<string, any> {
         const resolved: Record<string, any> = {};
         for (const [key, value] of Object.entries(conditions)) {
-            // Check if the key matches a belongs-to relationship across any schema
             const rel = this.relationships.find(
                 r => r.type === 'belongs-to' && r.relationshipField === key
             );
             if (rel && value && typeof value === 'object' && 'id' in value) {
-                // Replace { author: entity } → { authorId: entity.id }
                 resolved[rel.foreignKey] = value.id;
             } else {
                 resolved[key] = value;
@@ -422,19 +393,16 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
         const parts: string[] = [];
         const values: any[] = [];
 
-        // Resolve relationship fields: { author: tolstoy } → { authorId: tolstoy.id }
         const resolvedConditions = this.resolveEntityConditions(conditions);
 
         for (const key in resolvedConditions) {
             if (key.startsWith('$')) {
-                // Handle $or
                 if (key === '$or' && Array.isArray(resolvedConditions[key])) {
                     const orBranches = resolvedConditions[key] as Record<string, any>[];
                     const orParts: string[] = [];
                     for (const branch of orBranches) {
                         const sub = this.buildWhereClause(branch, tablePrefix);
                         if (sub.clause) {
-                            // Strip the leading "WHERE " from the sub-clause
                             orParts.push(`(${sub.clause.replace(/^WHERE /, '')})`);
                             values.push(...sub.values);
                         }
