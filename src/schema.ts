@@ -8,10 +8,10 @@ import { asZodObject } from './types';
 /**
  * Parse declarative `relations` config into Relationship[] objects.
  *
- * Config format: `{ childTable: { fieldName: 'parentTable' } }`
- * Example: `{ books: { author: 'authors' } }` produces:
- *   - books → authors  (belongs-to, FK = author_id)
- *   - authors → books  (one-to-many, inverse, field = 'books')
+ * Config format: `{ childTable: { fkColumn: 'parentTable' } }`
+ * Example: `{ books: { author_id: 'authors' } }` produces:
+ *   - books → authors  (belongs-to, FK = author_id, nav = author)
+ *   - authors → books  (one-to-many, nav = books)
  */
 export function parseRelationsConfig(
     relations: Record<string, Record<string, string>>,
@@ -24,20 +24,23 @@ export function parseRelationsConfig(
         if (!schemas[fromTable]) {
             throw new Error(`relations: unknown table '${fromTable}'`);
         }
-        for (const [fieldName, toTable] of Object.entries(rels)) {
+        for (const [fkColumn, toTable] of Object.entries(rels)) {
             if (!schemas[toTable]) {
-                throw new Error(`relations: unknown target table '${toTable}' in ${fromTable}.${fieldName}`);
+                throw new Error(`relations: unknown target table '${toTable}' in ${fromTable}.${fkColumn}`);
             }
 
-            // belongs-to: books.author → authors
-            const btKey = `${fromTable}.${fieldName}:belongs-to`;
+            // Derive navigation name: author_id → author
+            const navField = fkColumn.replace(/_id$/, '');
+
+            // belongs-to: books.author_id → authors
+            const btKey = `${fromTable}.${fkColumn}:belongs-to`;
             if (!added.has(btKey)) {
                 relationships.push({
                     type: 'belongs-to',
                     from: fromTable,
                     to: toTable,
-                    relationshipField: fieldName,
-                    foreignKey: `${fieldName}_id`,
+                    relationshipField: navField,
+                    foreignKey: fkColumn,
                 });
                 added.add(btKey);
             }
@@ -58,19 +61,6 @@ export function parseRelationsConfig(
     }
 
     return relationships;
-}
-
-/**
- * Check if a field is a relationship based on the relationships array.
- */
-export function isRelationshipField(
-    entityName: string,
-    key: string,
-    relationships: Relationship[],
-): boolean {
-    return relationships.some(
-        r => r.from === entityName && r.type === 'belongs-to' && r.relationshipField === key
-    );
 }
 
 /** Get storable (non-id) fields from a schema */
@@ -129,28 +119,4 @@ export function transformFromStorage(row: Record<string, any>, schema: z.ZodType
         }
     }
     return transformed;
-}
-
-/**
- * Preprocess relationship fields using the relationships array.
- * Converts entity references to FK values: { author: tolstoy } → { author_id: 1 }
- */
-export function preprocessRelationshipFields(
-    entityName: string,
-    data: Record<string, any>,
-    relationships: Relationship[],
-): Record<string, any> {
-    const processedData = { ...data };
-    for (const [key, value] of Object.entries(data)) {
-        if (isRelationshipField(entityName, key, relationships)) {
-            if (value && typeof value === 'object' && 'id' in value) {
-                processedData[`${key}_id`] = value.id;
-                delete processedData[key];
-            } else if (typeof value === 'number') {
-                processedData[`${key}_id`] = value;
-                delete processedData[key];
-            }
-        }
-    }
-    return processedData;
 }

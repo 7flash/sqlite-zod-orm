@@ -22,16 +22,15 @@ export type DatabaseOptions = {
     /**
      * Declare relationships between tables.
      *
-     * Format: `{ childTable: { fieldName: 'parentTable' } }`
+     * Format: `{ childTable: { fkColumn: 'parentTable' } }`
      *
-     * `books: { author: 'authors' }` means the books table will have
-     * an `author_id` column with a foreign key to the authors table.
+     * `books: { author_id: 'authors' }` means books.author_id is a FK
+     * referencing authors.id.
      *
      * The ORM auto-creates:
-     * - FK column (`author_id INTEGER REFERENCES authors(id)`)
+     * - FOREIGN KEY constraint on the FK column
      * - Inverse one-to-many (`author.books()`)
-     * - Lazy navigation (`book.author()`)
-     * - Entity ref support in insert/where (`{ author: tolstoy }`)
+     * - Lazy navigation (`book.author()` — derived by stripping `_id`)
      */
     relations?: Record<string, Record<string, string>>;
 };
@@ -53,10 +52,21 @@ export type InputSchema<S extends z.ZodType<any>> = z.input<S>;
 
 export type EntityData<S extends z.ZodType<any>> = Omit<InputSchema<S>, 'id'>;
 
+/**
+ * An entity returned from the ORM. Has all schema fields + `id` +
+ * `update()`/`delete()` methods.
+ *
+ * Lazy navigation methods (e.g. `book.author()`, `author.books()`)
+ * are attached at runtime based on the `relations` config. They are
+ * typed as `(...args: any[]) => any` to avoid nuking intellisense.
+ */
 export type AugmentedEntity<S extends z.ZodType<any>> = InferSchema<S> & {
+    /** Auto-generated primary key */
+    id: number;
+    /** Update this entity in the database */
     update: (data: Partial<EntityData<S>>) => AugmentedEntity<S> | null;
+    /** Delete this entity from the database */
     delete: () => void;
-    [key: string]: any;
 };
 
 /** Fluent update builder: `db.users.update({ level: 10 }).where({ name: 'Alice' }).exec()` */

@@ -17,10 +17,8 @@ import type {
 import { asZodObject } from './types';
 import {
     parseRelationsConfig,
-    isRelationshipField,
     getStorableFields,
     zodTypeToSqlType, transformForStorage, transformFromStorage,
-    preprocessRelationshipFields,
 } from './schema';
 
 // =============================================================================
@@ -74,17 +72,14 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
     private initializeTables(): void {
         for (const [entityName, schema] of Object.entries(this.schemas)) {
             const storableFields = getStorableFields(schema);
-            const storableFieldNames = new Set(storableFields.map(f => f.name));
             const columnDefs = storableFields.map(f => `${f.name} ${zodTypeToSqlType(f.type)}`);
             const constraints: string[] = [];
 
+            // Add FOREIGN KEY constraints for FK columns declared in the schema
             const belongsToRels = this.relationships.filter(
                 rel => rel.type === 'belongs-to' && rel.from === entityName
             );
             for (const rel of belongsToRels) {
-                if (!storableFieldNames.has(rel.foreignKey)) {
-                    columnDefs.push(`${rel.foreignKey} INTEGER`);
-                }
                 constraints.push(`FOREIGN KEY (${rel.foreignKey}) REFERENCES ${rel.to}(id) ON DELETE SET NULL`);
             }
 
@@ -108,20 +103,11 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
                 (this.db.query(`PRAGMA table_info(${entityName})`).all() as any[]).map(c => c.name)
             );
             const storableFields = getStorableFields(schema);
-            const fkColumns = this.relationships
-                .filter(rel => rel.type === 'belongs-to' && rel.from === entityName)
-                .map(rel => rel.foreignKey);
 
             for (const field of storableFields) {
                 if (!existingCols.has(field.name)) {
                     this.db.run(`ALTER TABLE ${entityName} ADD COLUMN ${field.name} ${zodTypeToSqlType(field.type)}`);
                     this.db.query(`INSERT OR IGNORE INTO _schema_meta (table_name, column_name) VALUES (?, ?)`).run(entityName, field.name);
-                }
-            }
-            for (const fk of fkColumns) {
-                if (!existingCols.has(fk)) {
-                    this.db.run(`ALTER TABLE ${entityName} ADD COLUMN ${fk} INTEGER`);
-                    this.db.query(`INSERT OR IGNORE INTO _schema_meta (table_name, column_name) VALUES (?, ?)`).run(entityName, fk);
                 }
             }
         }
@@ -191,14 +177,8 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
 
     private insert<T extends Record<string, any>>(entityName: string, data: Omit<T, 'id'>): AugmentedEntity<any> {
         const schema = this.schemas[entityName]!;
-        const processedData = preprocessRelationshipFields(entityName, data as Record<string, any>, this.relationships);
-        const validatedData = asZodObject(schema).passthrough().parse(processedData);
-        const storableData = Object.fromEntries(
-            Object.entries(validatedData).filter(([key]) =>
-                !isRelationshipField(entityName, key, this.relationships)
-            )
-        );
-        const transformed = transformForStorage(storableData);
+        const validatedData = asZodObject(schema).passthrough().parse(data);
+        const transformed = transformForStorage(validatedData);
         const columns = Object.keys(transformed);
 
         const sql = columns.length === 0
@@ -214,7 +194,7 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
         return newEntity;
     }
 
-    /** Internal: get a single entity by ID (used by insert, update, lazy nav) */
+    /** Internal: get a single entity by ID */
     private _getById(entityName: string, id: number): AugmentedEntity<any> | null {
         const row = this.db.query(`SELECT * FROM ${entityName} WHERE id = ?`).get(id) as any;
         if (!row) return null;
@@ -291,21 +271,19 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
     }
 
     private upsert<T extends Record<string, any>>(entityName: string, data: any, conditions: any = {}): AugmentedEntity<any> {
-        const processedData = preprocessRelationshipFields(entityName, data ?? {}, this.relationships);
-        const processedConditions = preprocessRelationshipFields(entityName, conditions ?? {}, this.relationships);
-        const hasId = processedData.id && typeof processedData.id === 'number';
+        const hasId = data?.id && typeof data.id === 'number';
         const existing = hasId
-            ? this._getById(entityName, processedData.id)
-            : Object.keys(processedConditions).length > 0
-                ? this._getOne(entityName, processedConditions)
+            ? this._getById(entityName, data.id)
+            : Object.keys(conditions ?? {}).length > 0
+                ? this._getOne(entityName, conditions)
                 : null;
 
         if (existing) {
-            const updateData = { ...processedData };
+            const updateData = { ...data };
             delete updateData.id;
             return this.update(entityName, existing.id, updateData) as AugmentedEntity<any>;
         }
-        const insertData = { ...processedConditions, ...processedData };
+        const insertData = { ...(conditions ?? {}), ...(data ?? {}) };
         delete insertData.id;
         return this.insert(entityName, insertData);
     }
@@ -333,7 +311,7 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
         // Attach lazy relationship navigation
         for (const rel of this.relationships) {
             if (rel.from === entityName && rel.type === 'belongs-to') {
-                // book.author() → lazy load parent
+                // book.author() → lazy load parent via author_id FK
                 augmented[rel.relationshipField] = () => {
                     const fkValue = entity[rel.foreignKey];
                     return fkValue ? this._getById(rel.to, fkValue) : null;
@@ -370,35 +348,14 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
     // SQL Helpers
     // ===========================================================================
 
-    /**
-     * Transform entity references in conditions to FK values.
-     * e.g. { author: tolstoy } → { author_id: tolstoy.id }
-     */
-    private resolveEntityConditions(conditions: Record<string, any>): Record<string, any> {
-        const resolved: Record<string, any> = {};
-        for (const [key, value] of Object.entries(conditions)) {
-            const rel = this.relationships.find(
-                r => r.type === 'belongs-to' && r.relationshipField === key
-            );
-            if (rel && value && typeof value === 'object' && 'id' in value) {
-                resolved[rel.foreignKey] = value.id;
-            } else {
-                resolved[key] = value;
-            }
-        }
-        return resolved;
-    }
-
     private buildWhereClause(conditions: Record<string, any>, tablePrefix?: string): { clause: string; values: any[] } {
         const parts: string[] = [];
         const values: any[] = [];
 
-        const resolvedConditions = this.resolveEntityConditions(conditions);
-
-        for (const key in resolvedConditions) {
+        for (const key in conditions) {
             if (key.startsWith('$')) {
-                if (key === '$or' && Array.isArray(resolvedConditions[key])) {
-                    const orBranches = resolvedConditions[key] as Record<string, any>[];
+                if (key === '$or' && Array.isArray(conditions[key])) {
+                    const orBranches = conditions[key] as Record<string, any>[];
                     const orParts: string[] = [];
                     for (const branch of orBranches) {
                         const sub = this.buildWhereClause(branch, tablePrefix);
@@ -411,7 +368,7 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
                 }
                 continue;
             }
-            const value = resolvedConditions[key];
+            const value = conditions[key];
             const fieldName = tablePrefix ? `${tablePrefix}.${key}` : key;
 
             if (typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Date)) {
@@ -503,10 +460,7 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
             return null;
         };
 
-        const conditionResolver = (conditions: Record<string, any>) =>
-            this.resolveEntityConditions(conditions);
-
-        const builder = new QueryBuilder(entityName, executor, singleExecutor, joinResolver, conditionResolver);
+        const builder = new QueryBuilder(entityName, executor, singleExecutor, joinResolver);
         if (initialCols.length > 0) builder.select(...initialCols);
         return builder;
     }
@@ -519,7 +473,6 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
             this.schemas,
             callback as any,
             (sql: string, params: any[]) => this.db.query(sql).all(...params) as T[],
-            this.relationships,
         );
     }
 }

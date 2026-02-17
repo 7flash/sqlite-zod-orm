@@ -143,37 +143,31 @@ test('compileProxyQuery: JOIN between two tables', () => {
     expect(sql).toContain('JOIN');
 });
 
-test('compileProxyQuery: relationship field auto-resolves to FK column', () => {
+test('compileProxyQuery: explicit FK column in schema', () => {
     const { z } = require('zod');
 
     const UserSchema = z.object({ name: z.string() });
-    const PostSchema = z.object({ title: z.string() });
+    const PostSchema = z.object({ title: z.string(), user_id: z.number().optional() });
 
     const schemas: any = {
         users: UserSchema,
         posts: PostSchema,
     };
 
-    // Config-based relationship: posts.user → users
-    const relationships = [
-        { type: 'belongs-to' as const, from: 'posts', to: 'users', relationshipField: 'user', foreignKey: 'user_id' },
-    ];
-
-    const { proxy, aliasMap } = createContextProxy(schemas, relationships);
+    const { proxy, aliasMap } = createContextProxy(schemas);
     const u = (proxy as any).users;
     const p = (proxy as any).posts;
 
-    // p.user should resolve to 'user_id' column (not 'user')
-    expect(p.user.column).toBe('user_id');
+    // p.user_id is a real schema column — no magic resolution
+    expect(p.user_id.column).toBe('user_id');
 
     const { sql } = compileProxyQuery(
         {
             select: { name: u.name, title: p.title },
-            join: [p.user, u.id],
+            join: [p.user_id, u.id],
         },
         aliasMap,
     );
     expect(sql).toContain('JOIN');
     expect(sql).toContain('"user_id"');
 });
-

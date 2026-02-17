@@ -7,7 +7,6 @@
  */
 
 import { z } from 'zod';
-import type { Relationship } from './types';
 
 // ---------- Column Node ----------
 
@@ -50,30 +49,25 @@ function qRef(alias: string, column: string): string {
 /**
  * Creates a proxy representing a table with a given alias.
  * Property access returns ColumnNode objects.
- * Relationship fields are auto-resolved to FK column names (field → field_id).
  */
 function createTableProxy(
     tableName: string,
     alias: string,
     columns: Set<string>,
-    relationshipFields: Set<string>,
 ): Record<string, ColumnNode> {
     return new Proxy({} as Record<string, ColumnNode>, {
         get(_target, prop: string): ColumnNode | undefined {
             if (prop === Symbol.toPrimitive as any || prop === 'toString' || prop === 'valueOf') {
                 return undefined;
             }
-            // Resolve relationship fields: b.author → ColumnNode for 'author_id'
-            const column = relationshipFields.has(prop) ? `${prop}_id` : prop;
-            return new ColumnNode(tableName, column, alias);
+            return new ColumnNode(tableName, prop, alias);
         },
         ownKeys() {
             return [...columns];
         },
         getOwnPropertyDescriptor(_target, prop) {
             if (columns.has(prop as string)) {
-                const column = relationshipFields.has(prop as string) ? `${prop as string}_id` : prop as string;
-                return { configurable: true, enumerable: true, value: new ColumnNode(tableName, column, alias) };
+                return { configurable: true, enumerable: true, value: new ColumnNode(tableName, prop as string, alias) };
             }
             return undefined;
         },
@@ -94,7 +88,6 @@ interface AliasEntry {
  */
 export function createContextProxy(
     schemas: Record<string, z.ZodType<any>>,
-    relationships: Relationship[] = [],
 ): { proxy: Record<string, Record<string, ColumnNode>>; aliasMap: Map<string, AliasEntry[]> } {
     const aliases = new Map<string, AliasEntry[]>();
     let aliasCounter = 0;
@@ -109,18 +102,9 @@ export function createContextProxy(
                 : {};
             const columns = new Set(Object.keys(shape));
 
-            // Detect relationship fields from config-based relations
-            const relationshipFields = new Set<string>();
-            for (const rel of relationships) {
-                if (rel.from === tableName && rel.type === 'belongs-to') {
-                    relationshipFields.add(rel.relationshipField);
-                    columns.add(rel.relationshipField); // make it accessible via proxy
-                }
-            }
-
             aliasCounter++;
             const alias = `t${aliasCounter}`;
-            const tableProxy = createTableProxy(tableName, alias, columns, relationshipFields);
+            const tableProxy = createTableProxy(tableName, alias, columns);
 
             // Track alias
             const entries = aliases.get(tableName) || [];
@@ -313,17 +297,16 @@ export function compileProxyQuery(
  * @param schemas The schema map for all registered tables.
  * @param callback The user's query callback that receives the context proxy.
  * @param executor A function that runs the compiled SQL and returns rows.
- * @param relationships Optional relationships array for config-based relations.
  * @returns The query results.
  */
 export function executeProxyQuery<T>(
     schemas: Record<string, z.ZodType<any>>,
     callback: (ctx: any) => ProxyQueryResult,
     executor: (sql: string, params: any[]) => T[],
-    relationships: Relationship[] = [],
 ): T[] {
-    const { proxy, aliasMap } = createContextProxy(schemas, relationships);
+    const { proxy, aliasMap } = createContextProxy(schemas);
     const queryResult = callback(proxy);
     const { sql, params } = compileProxyQuery(queryResult, aliasMap);
     return executor(sql, params);
 }
+

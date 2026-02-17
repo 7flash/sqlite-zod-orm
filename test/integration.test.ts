@@ -14,7 +14,7 @@
 import { describe, test, expect } from 'bun:test';
 import { Database, z } from '../src/index';
 
-// -- Config-based relations only, no z.lazy, no interfaces --
+// -- Explicit FK columns in schemas, config declares which FK → table --
 
 const ForestSchema = z.object({
     name: z.string(),
@@ -25,6 +25,7 @@ const TreeSchema = z.object({
     name: z.string(),
     planted: z.string(),
     alive: z.boolean().default(true),
+    forest_id: z.number().optional(),
 });
 
 const db = new Database(':memory:', {
@@ -32,7 +33,7 @@ const db = new Database(':memory:', {
     trees: TreeSchema,
 }, {
     relations: {
-        trees: { forest: 'forests' },
+        trees: { forest_id: 'forests' },
     },
     indexes: { trees: ['forest_id', 'planted'] },
 });
@@ -62,7 +63,7 @@ describe('Forests — CRUD', () => {
     test('select().where().all() returns matching rows', () => {
         const results = db.forests.select().where({ name: 'Amazon' }).all();
         expect(results.length).toBe(1);
-        expect(results[0].address).toBe('Brazil');
+        expect(results[0]!.address).toBe('Brazil');
     });
 
     test('update by ID', () => {
@@ -89,13 +90,13 @@ describe('Trees — Fluent queries', () => {
         const amazon = db.forests.select().where({ name: 'Amazon' }).get()!;
         const sherwood = db.forests.select().where({ name: 'Sherwood' }).get()!;
 
-        db.trees.insert({ name: 'Mahogany', planted: '1990-01-01', forest: amazon } as any);
-        db.trees.insert({ name: 'Rubber Tree', planted: '1995-06-15', forest: amazon } as any);
-        db.trees.insert({ name: 'Oak', planted: '1800-01-01', forest: sherwood } as any);
-        db.trees.insert({ name: 'Major Oak', planted: '1300-01-01', forest: sherwood } as any);
-        db.trees.insert({ name: 'Dead Elm', planted: '1850-01-01', alive: false, forest: sherwood } as any);
-        db.trees.insert({ name: 'Dead Yew', planted: '1700-01-01', alive: false, forest: sherwood } as any);
-        db.trees.insert({ name: 'Dead Ash', planted: '1600-01-01', alive: false, forest: sherwood } as any);
+        db.trees.insert({ name: 'Mahogany', planted: '1990-01-01', forest_id: amazon.id });
+        db.trees.insert({ name: 'Rubber Tree', planted: '1995-06-15', forest_id: amazon.id });
+        db.trees.insert({ name: 'Oak', planted: '1800-01-01', forest_id: sherwood.id });
+        db.trees.insert({ name: 'Major Oak', planted: '1300-01-01', forest_id: sherwood.id });
+        db.trees.insert({ name: 'Dead Elm', planted: '1850-01-01', alive: false, forest_id: sherwood.id });
+        db.trees.insert({ name: 'Dead Yew', planted: '1700-01-01', alive: false, forest_id: sherwood.id });
+        db.trees.insert({ name: 'Dead Ash', planted: '1600-01-01', alive: false, forest_id: sherwood.id });
 
         expect(db.trees.select().count()).toBeGreaterThanOrEqual(7);
     });
@@ -108,7 +109,7 @@ describe('Trees — Fluent queries', () => {
             .limit(1)
             .all();
         expect(result.length).toBe(1);
-        expect(result[0].name).toBe('Major Oak');
+        expect(result[0]!.name).toBe('Major Oak');
     });
 
     test('count()', () => {
@@ -147,19 +148,19 @@ describe('Trees — Fluent queries', () => {
 });
 
 // =============================================================================
-// 3. ENTITY REFERENCES (insert + where)
+// 3. EXPLICIT FK INSERTS
 // =============================================================================
 
-describe('Entity references', () => {
-    test('insert with entity reference resolves FK', () => {
+describe('Explicit FK inserts', () => {
+    test('insert with explicit FK', () => {
         const amazon = db.forests.select().where({ name: 'Amazon' }).get()!;
-        const tree = db.trees.insert({ name: 'Brazil Nut', planted: '1850-01-01', forest: amazon } as any);
+        const tree = db.trees.insert({ name: 'Brazil Nut', planted: '1850-01-01', forest_id: amazon.id });
         expect(tree.forest_id).toBe(amazon.id);
     });
 
-    test('where with entity reference', () => {
+    test('where with FK', () => {
         const sherwood = db.forests.select().where({ name: 'Sherwood' }).get()!;
-        const trees = db.trees.select().where({ forest: sherwood } as any).all();
+        const trees = db.trees.select().where({ forest_id: sherwood.id }).all();
         expect(trees.length).toBeGreaterThanOrEqual(5);
     });
 });
@@ -230,7 +231,7 @@ describe('Proxy query', () => {
             const { forests: f, trees: t } = c;
             return {
                 select: { tree: t.name, forest: f.name },
-                join: [[t.forest, f.id]],
+                join: [[t.forest_id, f.id]],
                 where: { [f.name]: 'Amazon' },
                 orderBy: { [t.planted]: 'asc' },
             };
@@ -239,13 +240,13 @@ describe('Proxy query', () => {
         expect((rows[0] as any).forest).toBe('Amazon');
     });
 
-    test('relationship field auto-resolves to FK', () => {
-        // t.forest should resolve to t.forest_id in the SQL
+    test('FK column is explicit — no magic resolution', () => {
+        // t.forest_id is a real schema column, used directly
         const rows = db.query((c: any) => {
             const { forests: f, trees: t } = c;
             return {
                 select: { tree: t.name },
-                join: [[t.forest, f.id]],
+                join: [[t.forest_id, f.id]],
                 where: { [f.name]: 'Sherwood' },
             };
         });
@@ -281,7 +282,7 @@ describe('Upsert and transactions', () => {
         const amazon = db.forests.select().where({ name: 'Amazon' }).get()!;
         db.trees.upsert(
             { name: 'Kapok' } as any,
-            { name: 'Kapok', planted: '1900-01-01', alive: true, forest_id: amazon.id } as any,
+            { name: 'Kapok', planted: '1900-01-01', alive: true, forest_id: amazon.id },
         );
         const found = db.trees.select().where({ name: 'Kapok' }).get();
         expect(found).not.toBeNull();
@@ -290,7 +291,7 @@ describe('Upsert and transactions', () => {
     test('upsert updates when found', () => {
         db.trees.upsert(
             { name: 'Kapok' } as any,
-            { name: 'Kapok', planted: '1950-01-01' } as any,
+            { name: 'Kapok', planted: '1950-01-01' },
         );
         const found = db.trees.select().where({ name: 'Kapok' }).get()!;
         expect(found.planted).toBe('1950-01-01');
@@ -364,7 +365,7 @@ describe('Schema validation', () => {
 
     test('defaults are applied (alive = true)', () => {
         const amazon = db.forests.select().where({ name: 'Amazon' }).get()!;
-        const tree = db.trees.insert({ name: 'Test Sapling', planted: '2025-01-01', forest: amazon } as any);
+        const tree = db.trees.insert({ name: 'Test Sapling', planted: '2025-01-01', forest_id: amazon.id });
         expect(tree.alive).toBe(true);
         tree.delete(); // cleanup
     });
@@ -397,6 +398,7 @@ describe('Config-based relations — authors/books', () => {
     const BookSchema = z.object({
         title: z.string(),
         year: z.number(),
+        author_id: z.number().optional(),
     });
 
     const cdb = new Database(':memory:', {
@@ -404,30 +406,30 @@ describe('Config-based relations — authors/books', () => {
         books: BookSchema,
     }, {
         relations: {
-            books: { author: 'authors' },
+            books: { author_id: 'authors' },
         },
     });
 
     const tolstoy = cdb.authors.insert({ name: 'Leo Tolstoy', country: 'Russia' });
     const kafka = cdb.authors.insert({ name: 'Franz Kafka', country: 'Czech Republic' });
-    cdb.books.insert({ title: 'War and Peace', year: 1869, author: tolstoy } as any);
-    cdb.books.insert({ title: 'Anna Karenina', year: 1878, author: tolstoy } as any);
-    cdb.books.insert({ title: 'The Trial', year: 1925, author: kafka } as any);
+    cdb.books.insert({ title: 'War and Peace', year: 1869, author_id: tolstoy.id });
+    cdb.books.insert({ title: 'Anna Karenina', year: 1878, author_id: tolstoy.id });
+    cdb.books.insert({ title: 'The Trial', year: 1925, author_id: kafka.id });
 
     test('FK column is author_id', () => {
         const books = cdb.books.select().all();
         expect(books.length).toBe(3);
-        expect(books[0].author_id).toBe(tolstoy.id);
+        expect(books[0]!.author_id).toBe(tolstoy.id);
     });
 
-    test('select().where() with entity reference', () => {
-        const books = cdb.books.select().where({ author: tolstoy } as any).all();
+    test('select().where() with FK', () => {
+        const books = cdb.books.select().where({ author_id: tolstoy.id }).all();
         expect(books.length).toBe(2);
         expect(books.map(b => b.title).sort()).toEqual(['Anna Karenina', 'War and Peace']);
     });
 
-    test('select().where().get() with entity reference', () => {
-        const book = cdb.books.select().where({ author: kafka } as any).get();
+    test('select().where().get() with FK', () => {
+        const book = cdb.books.select().where({ author_id: kafka.id }).get();
         expect(book?.title).toBe('The Trial');
     });
 
@@ -458,7 +460,7 @@ describe('Config-based relations — authors/books', () => {
             const { authors: a, books: b } = c;
             return {
                 select: { author: a.name, book: b.title },
-                join: [[b.author, a.id]],
+                join: [[b.author_id, a.id]],
                 where: { [a.country]: 'Russia' },
                 orderBy: { [b.year]: 'asc' },
             };

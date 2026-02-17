@@ -224,7 +224,7 @@ export class QueryBuilder<T extends Record<string, any>> {
      * ))
      * ```
      */
-    where(criteriaOrCallback: Partial<Record<keyof T & string, any>> | WhereCallback<T>): this {
+    where(criteriaOrCallback: (Partial<Record<keyof T & string, any>> & { $or?: Partial<Record<keyof T & string, any>>[] }) | WhereCallback<T>): this {
         if (typeof criteriaOrCallback === 'function') {
             // Callback-style: evaluate with proxies to produce AST
             const ast = (criteriaOrCallback as WhereCallback<T>)(

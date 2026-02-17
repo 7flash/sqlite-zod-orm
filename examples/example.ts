@@ -3,11 +3,10 @@
  *
  * Demonstrates all core features in a single runnable file:
  *  - Schema definition with Zod validation & defaults
- *  - Config-based relations (no z.lazy, no interfaces!)
+ *  - Config-based relations — FK columns explicit in schema
  *  - Insert + select() queries (CRUD)
  *  - Query operators ($gt, $in, $ne, $lt, $gte, $or)
  *  - Lazy navigation: book.author(), author.books()
- *  - Entity references in insert & WHERE
  *  - Fluent .join() for cross-table queries
  *  - Proxy callback db.query() for SQL-like JOINs
  *  - Upsert, transactions, pagination
@@ -18,7 +17,7 @@
 import { Database, z } from '../src/index';
 
 // =============================================================================
-// 1. SCHEMAS — Clean z.object(), no z.lazy() or interfaces needed!
+// 1. SCHEMAS — Clean z.object() with explicit FK columns
 // =============================================================================
 
 const AuthorSchema = z.object({
@@ -30,6 +29,7 @@ const BookSchema = z.object({
     title: z.string(),
     year: z.number(),
     pages: z.number(),
+    author_id: z.number().optional(),  // FK is explicit in the schema
 });
 
 const UserSchema = z.object({
@@ -48,9 +48,10 @@ const db = new Database(':memory:', {
     authors: AuthorSchema,
     books: BookSchema,
 }, {
-    // books: { author: 'authors' } → books gets an author_id FK column
+    // Relations declare which FK column points to which table
+    // books: { author_id: 'authors' } → lazy nav: book.author(), author.books()
     relations: {
-        books: { author: 'authors' },
+        books: { author_id: 'authors' },
     },
     indexes: {
         users: ['email', ['name', 'role']],
@@ -114,7 +115,7 @@ const adminsOrHighScore = db.users.select()
 console.log('Admins or high scorers:', adminsOrHighScore.map((u: any) => `${u.name} (${u.role}, ${u.score})`));
 
 // =============================================================================
-// 5. RELATIONSHIPS — entity references in insert & WHERE
+// 5. RELATIONSHIPS — explicit FK in insert
 // =============================================================================
 
 console.log('\n── 3. Relationships ──');
@@ -123,22 +124,18 @@ const tolstoy = db.authors.insert({ name: 'Leo Tolstoy', country: 'Russia' });
 const dostoevsky = db.authors.insert({ name: 'Fyodor Dostoevsky', country: 'Russia' });
 const kafka = db.authors.insert({ name: 'Franz Kafka', country: 'Czech Republic' });
 
-// Insert with entity reference — ORM auto-resolves to author_id FK
-db.books.insert({ title: 'War and Peace', year: 1869, pages: 1225, author: tolstoy } as any);
-db.books.insert({ title: 'Anna Karenina', year: 1878, pages: 864, author: tolstoy } as any);
-db.books.insert({ title: 'Crime and Punishment', year: 1866, pages: 671, author: dostoevsky } as any);
-db.books.insert({ title: 'The Brothers Karamazov', year: 1880, pages: 796, author: dostoevsky } as any);
-db.books.insert({ title: 'The Trial', year: 1925, pages: 255, author: kafka } as any);
+// Insert with explicit FK — clean and obvious
+db.books.insert({ title: 'War and Peace', year: 1869, pages: 1225, author_id: tolstoy.id });
+db.books.insert({ title: 'Anna Karenina', year: 1878, pages: 864, author_id: tolstoy.id });
+db.books.insert({ title: 'Crime and Punishment', year: 1866, pages: 671, author_id: dostoevsky.id });
+db.books.insert({ title: 'The Brothers Karamazov', year: 1880, pages: 796, author_id: dostoevsky.id });
+db.books.insert({ title: 'The Trial', year: 1925, pages: 255, author_id: kafka.id });
 
 console.log(`Seeded ${db.authors.select().count()} authors, ${db.books.select().count()} books`);
 
-// select().where() with entity reference
-const tolstoyBooks = db.books.select().where({ author: tolstoy } as any).all();
+// Query by FK
+const tolstoyBooks = db.books.select().where({ author_id: tolstoy.id }).all();
 console.log('Tolstoy books:', tolstoyBooks.map((b: any) => b.title));
-
-// select().where().get() with entity reference
-const firstDostoevsky = db.books.select().where({ author: dostoevsky } as any).get();
-console.log('First Dostoevsky:', firstDostoevsky?.title);
 
 // =============================================================================
 // 6. LAZY NAVIGATION — book.author(), author.books()
@@ -146,18 +143,18 @@ console.log('First Dostoevsky:', firstDostoevsky?.title);
 
 console.log('\n── 4. Lazy Navigation ──');
 
-// belongs-to: book → author
+// belongs-to: book → author (derived from author_id → `author()`)
 const warAndPeace = db.books.select().where({ title: 'War and Peace' }).get()!;
-const bookAuthor = warAndPeace.author();
+const bookAuthor = (warAndPeace as any).author();
 console.log(`"${warAndPeace.title}" by ${bookAuthor.name} (${bookAuthor.country})`);
 
 // one-to-many: author → books
-const dostoevskyBooks = dostoevsky.books();
+const dostoevskyBooks = (dostoevsky as any).books();
 console.log(`Dostoevsky's books: ${dostoevskyBooks.map((b: any) => b.title).join(', ')}`);
 
 // Chain: get author, then their books
 const kafkaEntity = db.authors.select().where({ name: 'Franz Kafka' }).get()!;
-const kafkaBooks = kafkaEntity.books();
+const kafkaBooks = (kafkaEntity as any).books();
 console.log(`Kafka's books: ${kafkaBooks.map((b: any) => b.title).join(', ')}`);
 
 // =============================================================================
@@ -193,7 +190,7 @@ const russianBooks = db.query((c) => {
     const { authors: a, books: b } = c;
     return {
         select: { author: a.name, book: b.title, year: b.year },
-        join: [[b.author, a.id]],
+        join: [[b.author_id, a.id]],  // explicit FK column in JOIN
         where: { [a.country]: 'Russia' },
         orderBy: { [b.year]: 'asc' },
     };
