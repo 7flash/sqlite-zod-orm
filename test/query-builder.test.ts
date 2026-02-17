@@ -213,4 +213,71 @@ describe('SatiDB - Fluent Query Builder API', () => {
         expect(european.length).toBe(1);
         expect(european[0]!.name).toBe('Black Forest');
     });
+
+    // ---- Callback-style WHERE (AST-based) ----
+
+    it('should filter with callback-style where using op.eq', () => {
+        const trees = db.trees.select()
+            .where((c, f, op) => op.eq(c.species, 'Spruce'))
+            .all();
+        expect(trees.length).toBe(1);
+        expect(trees[0]!.species).toBe('Spruce');
+    });
+
+    it('should compose AND + GT in callback-style where', () => {
+        const trees = db.trees.select()
+            .where((c, f, op) => op.and(
+                op.eq(c.forestId, 1),
+                op.gt(c.height, 40),
+            ))
+            .all();
+        expect(trees.length).toBe(1);
+        expect(trees[0]!.species).toBe('Brazil Nut');
+    });
+
+    it('should use SQL functions via f proxy in callback-style where', () => {
+        const trees = db.trees.select()
+            .where((c, f, op) => op.eq(f.lower(c.species), 'spruce'))
+            .all();
+        expect(trees.length).toBe(1);
+        expect(trees[0]!.species).toBe('Spruce');
+    });
+
+    it('should chain callback-style where with limit and orderBy', () => {
+        const trees = db.trees.select()
+            .where((c, f, op) => op.gte(c.height, 30))
+            .orderBy('height', 'desc')
+            .limit(2)
+            .all();
+        expect(trees.length).toBe(2);
+        expect(trees[0]!.species).toBe('Coast Redwood');
+        expect(trees[1]!.species).toBe('Giant Sequoia');
+    });
+
+    it('should count with callback-style where', () => {
+        const count = db.trees.select()
+            .where((c, f, op) => op.gt(c.height, 50))
+            .count();
+        expect(count).toBe(2);
+    });
+
+    it('should support OR in callback-style where', () => {
+        const trees = db.trees.select()
+            .where((c, f, op) => op.or(
+                op.eq(c.species, 'Oak'),
+                op.eq(c.species, 'Spruce'),
+            ))
+            .all();
+        expect(trees.length).toBe(2);
+        const species = trees.map(t => t.species).sort();
+        expect(species).toEqual(['Oak', 'Spruce']);
+    });
+
+    it('should return null with callback-style .get() when nothing matches', () => {
+        const tree = db.trees.select()
+            .where((c, f, op) => op.eq(c.species, 'Baobab'))
+            .get();
+        expect(tree).toBeNull();
+    });
 });
+

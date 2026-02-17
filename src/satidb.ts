@@ -945,3 +945,9 @@ export type DB<S extends SchemaMap> = SatiDB<S>;
 export { SatiDB, z };
 export { QueryBuilder } from './query-builder';
 export { ColumnNode, type ProxyQueryResult } from './proxy-query';
+export {
+  type ASTNode, type WhereCallback, type SetCallback,
+  type TypedColumnProxy, type FunctionProxy, type Operators,
+  compileAST, wrapNode, createColumnProxy, createFunctionProxy, op,
+} from './ast';
+

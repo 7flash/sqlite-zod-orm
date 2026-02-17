@@ -1,4 +1,8 @@
 import { z } from 'zod';
+import {
+    type ASTNode, type WhereCallback, type TypedColumnProxy, type FunctionProxy, type Operators,
+    compileAST, wrapNode, createColumnProxy, createFunctionProxy, op,
+} from './ast';
 
 // ---------- Internal Query Object (IQO) ----------
 
@@ -14,6 +18,7 @@ interface WhereCondition {
 interface IQO {
     selects: string[];
     wheres: WhereCondition[];
+    whereAST: ASTNode | null;
     limit: number | null;
     offset: number | null;
     orderBy: { field: string; direction: OrderDirection }[];
@@ -50,8 +55,12 @@ export function compileIQO(tableName: string, iqo: IQO): { sql: string; params: 
 
     let sql = `SELECT ${selectClause} FROM ${tableName}`;
 
-    // WHERE clause
-    if (iqo.wheres.length > 0) {
+    // WHERE clause — AST-based takes precedence if set
+    if (iqo.whereAST) {
+        const compiled = compileAST(iqo.whereAST);
+        sql += ` WHERE ${compiled.sql}`;
+        params.push(...compiled.params);
+    } else if (iqo.wheres.length > 0) {
         const whereParts: string[] = [];
         for (const w of iqo.wheres) {
             if (w.operator === 'IN') {
@@ -96,6 +105,10 @@ export function compileIQO(tableName: string, iqo: IQO): { sql: string; params: 
  * A Fluent Query Builder that accumulates query state via chaining
  * and only executes when a terminal method is called (.all(), .get())
  * or when it is `await`-ed (thenable).
+ *
+ * Supports two WHERE styles:
+ * - Object-style: `.where({ name: 'Alice', age: { $gt: 18 } })`
+ * - Callback-style (AST): `.where((c, f, op) => op.and(op.eq(c.name, 'Alice'), op.gt(c.age, 18)))`
  */
 export class QueryBuilder<T extends Record<string, any>> {
     private iqo: IQO;
@@ -114,6 +127,7 @@ export class QueryBuilder<T extends Record<string, any>> {
         this.iqo = {
             selects: [],
             wheres: [],
+            whereAST: null,
             limit: null,
             offset: null,
             orderBy: [],
@@ -132,29 +146,52 @@ export class QueryBuilder<T extends Record<string, any>> {
     }
 
     /**
-     * Add WHERE conditions.
-     * Supports direct value matching and operator objects:
+     * Add WHERE conditions. Two calling styles:
+     *
+     * **Object-style** (simple equality and operators):
      * ```ts
      * .where({ name: 'Alice' })
      * .where({ age: { $gt: 18 } })
-     * .where({ status: { $in: ['active', 'pending'] } })
+     * ```
+     *
+     * **Callback-style** (AST-based, full SQL expression power):
+     * ```ts
+     * .where((c, f, op) => op.and(
+     *   op.eq(f.lower(c.name), 'alice'),
+     *   op.gt(c.age, 18)
+     * ))
      * ```
      */
-    where(criteria: Partial<Record<keyof T & string, any>>): this {
-        for (const [key, value] of Object.entries(criteria)) {
-            if (typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Date)) {
-                // Operator-style: { $gt: 5 }
-                for (const [op, operand] of Object.entries(value)) {
-                    const sqlOp = OPERATOR_MAP[op as WhereOperator];
-                    if (!sqlOp) throw new Error(`Unsupported query operator: '${op}' on field '${key}'.`);
-                    this.iqo.wheres.push({
-                        field: key,
-                        operator: sqlOp as WhereCondition['operator'],
-                        value: operand,
-                    });
-                }
+    where(criteriaOrCallback: Partial<Record<keyof T & string, any>> | WhereCallback<T>): this {
+        if (typeof criteriaOrCallback === 'function') {
+            // Callback-style: evaluate with proxies to produce AST
+            const ast = (criteriaOrCallback as WhereCallback<T>)(
+                createColumnProxy<T>(),
+                createFunctionProxy(),
+                op,
+            );
+            // If we already have an AST, AND them together
+            if (this.iqo.whereAST) {
+                this.iqo.whereAST = { type: 'operator', op: 'AND', left: this.iqo.whereAST, right: ast };
             } else {
-                this.iqo.wheres.push({ field: key, operator: '=', value });
+                this.iqo.whereAST = ast;
+            }
+        } else {
+            // Object-style: parse into IQO conditions
+            for (const [key, value] of Object.entries(criteriaOrCallback)) {
+                if (typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Date)) {
+                    for (const [opKey, operand] of Object.entries(value)) {
+                        const sqlOp = OPERATOR_MAP[opKey as WhereOperator];
+                        if (!sqlOp) throw new Error(`Unsupported query operator: '${opKey}' on field '${key}'.`);
+                        this.iqo.wheres.push({
+                            field: key,
+                            operator: sqlOp as WhereCondition['operator'],
+                            value: operand,
+                        });
+                    }
+                } else {
+                    this.iqo.wheres.push({ field: key, operator: '=', value });
+                }
             }
         }
         return this;
@@ -207,14 +244,17 @@ export class QueryBuilder<T extends Record<string, any>> {
 
     /** Execute the query and return the count of matching rows. */
     count(): number {
-        const iqoCopy = { ...this.iqo, selects: [] };
-        // Build a COUNT query
         const params: any[] = [];
         let sql = `SELECT COUNT(*) as count FROM ${this.tableName}`;
 
-        if (iqoCopy.wheres.length > 0) {
+        // WHERE — AST takes precedence
+        if (this.iqo.whereAST) {
+            const compiled = compileAST(this.iqo.whereAST);
+            sql += ` WHERE ${compiled.sql}`;
+            params.push(...compiled.params);
+        } else if (this.iqo.wheres.length > 0) {
             const whereParts: string[] = [];
-            for (const w of iqoCopy.wheres) {
+            for (const w of this.iqo.wheres) {
                 if (w.operator === 'IN') {
                     const arr = w.value as any[];
                     if (arr.length === 0) {
@@ -232,7 +272,6 @@ export class QueryBuilder<T extends Record<string, any>> {
             sql += ` WHERE ${whereParts.join(' AND ')}`;
         }
 
-        // Use executor in raw mode to get count
         const results = this.executor(sql, params, true);
         return (results[0] as any)?.count ?? 0;
     }

@@ -269,7 +269,7 @@ export type EntityAccessor<T, D> = {
     delete: (id: number) => void;
     /** Subscribes to database events ('insert', 'update', 'delete') for this entity type. */
     subscribe: (event: 'insert' | 'update' | 'delete', callback: (data: T) => void) => void;
-    /** Unsubscribes from database events ('insert' | 'update' | 'delete') for this entity type. */
+    /** Unsubscribes from database events ('insert', 'update', 'delete') for this entity type. */
     unsubscribe: (event: 'insert' | 'update' | 'delete', callback: (data: T) => void) => void;
     /** Fluent query builder: db.users.select().where({ level: 10 }).limit(5).all() */
     select: (...cols: (keyof D & string)[]) => QueryBuilder<T>;
