@@ -144,17 +144,20 @@ export class QueryBuilder<T extends Record<string, any>> {
     private executor: (sql: string, params: any[], raw: boolean) => any[];
     private singleExecutor: (sql: string, params: any[], raw: boolean) => any | null;
     private joinResolver: ((fromTable: string, toTable: string) => { fk: string; pk: string } | null) | null;
+    private conditionResolver: ((conditions: Record<string, any>) => Record<string, any>) | null;
 
     constructor(
         tableName: string,
         executor: (sql: string, params: any[], raw: boolean) => any[],
         singleExecutor: (sql: string, params: any[], raw: boolean) => any | null,
         joinResolver?: ((fromTable: string, toTable: string) => { fk: string; pk: string } | null) | null,
+        conditionResolver?: ((conditions: Record<string, any>) => Record<string, any>) | null,
     ) {
         this.tableName = tableName;
         this.executor = executor;
         this.singleExecutor = singleExecutor;
         this.joinResolver = joinResolver ?? null;
+        this.conditionResolver = conditionResolver ?? null;
         this.iqo = {
             selects: [],
             wheres: [],
@@ -209,8 +212,13 @@ export class QueryBuilder<T extends Record<string, any>> {
                 this.iqo.whereAST = ast;
             }
         } else {
+            // Resolve entity references: { author: tolstoy } → { authorId: tolstoy.id }
+            const resolved = this.conditionResolver
+                ? this.conditionResolver(criteriaOrCallback as Record<string, any>)
+                : criteriaOrCallback;
+
             // Object-style: parse into IQO conditions
-            for (const [key, value] of Object.entries(criteriaOrCallback)) {
+            for (const [key, value] of Object.entries(resolved)) {
                 if (typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Date)) {
                     for (const [opKey, operand] of Object.entries(value)) {
                         const sqlOp = OPERATOR_MAP[opKey as WhereOperator];

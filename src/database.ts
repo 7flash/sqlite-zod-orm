@@ -12,6 +12,7 @@ import { executeProxyQuery, type ProxyQueryResult } from './proxy-query';
 import type {
     SchemaMap, DatabaseOptions, Relationship,
     EntityAccessor, TypedAccessors, AugmentedEntity, UpdateBuilder,
+    ProxyColumns, InferSchema,
 } from './types';
 import { asZodObject } from './types';
 import {
@@ -355,13 +356,37 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
     // SQL Helpers
     // ===========================================================================
 
+    /**
+     * Transform entity references in conditions to FK values.
+     * e.g. { author: tolstoy } → { authorId: tolstoy.id }
+     */
+    private resolveEntityConditions(conditions: Record<string, any>): Record<string, any> {
+        const resolved: Record<string, any> = {};
+        for (const [key, value] of Object.entries(conditions)) {
+            // Check if the key matches a belongs-to relationship across any schema
+            const rel = this.relationships.find(
+                r => r.type === 'belongs-to' && r.relationshipField === key
+            );
+            if (rel && value && typeof value === 'object' && 'id' in value) {
+                // Replace { author: entity } → { authorId: entity.id }
+                resolved[rel.foreignKey] = value.id;
+            } else {
+                resolved[key] = value;
+            }
+        }
+        return resolved;
+    }
+
     private buildWhereClause(conditions: Record<string, any>, tablePrefix?: string): { clause: string; values: any[] } {
         const parts: string[] = [];
         const values: any[] = [];
 
-        for (const key in conditions) {
+        // Resolve relationship fields: { author: tolstoy } → { authorId: tolstoy.id }
+        const resolvedConditions = this.resolveEntityConditions(conditions);
+
+        for (const key in resolvedConditions) {
             if (key.startsWith('$')) continue;
-            const value = conditions[key];
+            const value = resolvedConditions[key];
             const fieldName = tablePrefix ? `${tablePrefix}.${key}` : key;
 
             if (typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Date)) {
@@ -453,14 +478,17 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
             return null;
         };
 
-        const builder = new QueryBuilder(entityName, executor, singleExecutor, joinResolver);
+        const conditionResolver = (conditions: Record<string, any>) =>
+            this.resolveEntityConditions(conditions);
+
+        const builder = new QueryBuilder(entityName, executor, singleExecutor, joinResolver, conditionResolver);
         if (initialCols.length > 0) builder.select(...initialCols);
         return builder;
     }
 
     /** Proxy callback query for complex SQL-like JOINs */
     public query<T extends Record<string, any> = Record<string, any>>(
-        callback: (ctx: { [K in keyof Schemas]: Record<string, any> }) => ProxyQueryResult
+        callback: (ctx: { [K in keyof Schemas]: ProxyColumns<InferSchema<Schemas[K]>> }) => ProxyQueryResult
     ): T[] {
         return executeProxyQuery(
             this.schemas,

@@ -12,35 +12,76 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { createForestsDb } from '../examples/forests';
+import { Database, z } from '../src/index';
 
-const { db, displayName } = createForestsDb();
+// -- Inline setup (was examples/forests.ts) --
+
+interface Forest { name: string; address: string; trees?: Tree[]; }
+interface Tree { name: string; planted: string; alive?: boolean; forest?: Forest; }
+
+const ForestSchema: z.ZodType<Forest> = z.object({
+    name: z.string(),
+    address: z.string(),
+    trees: z.lazy(() => z.array(TreeSchema)).optional(),
+});
+
+const TreeSchema: z.ZodType<Tree> = z.object({
+    name: z.string(),
+    planted: z.string(),
+    alive: z.boolean().default(true),
+    forest: z.lazy(() => ForestSchema).optional(),
+});
+
+const db = new Database(':memory:', {
+    forests: ForestSchema,
+    trees: TreeSchema,
+}, {
+    indexes: { trees: ['forestId', 'planted'] },
+});
+
+function displayName(forest: any) {
+    return `${forest.name} - ${forest.address}`;
+}
 
 // =============================================================================
 // 1. SEED — insert with explicit FK
 // =============================================================================
 
 describe('Forests — Seed', () => {
-    test('create forests and add trees via FK', () => {
+    test('create forests and add trees via entity reference', () => {
         // Insert forests
         const sherwood = db.forests.insert({ name: 'Sherwood', address: 'Nottingham, UK' });
         const amazon = db.forests.insert({ name: 'Amazon', address: 'South America' });
         const blackForest = db.forests.insert({ name: 'Black Forest', address: 'Baden-Württemberg, DE' });
 
-        // Add trees with explicit forestId FK
-        db.trees.insert({ name: 'Major Oak', planted: '1500-01-01', forestId: sherwood.id } as any);
-        db.trees.insert({ name: 'Robin Hood Oak', planted: '1600-03-15', forestId: sherwood.id } as any);
-        db.trees.insert({ name: 'Dead Elm', planted: '1700-06-01', alive: false, forestId: sherwood.id } as any);
+        // Add trees — pass entity directly, ORM resolves to FK
+        db.trees.insert({ name: 'Major Oak', planted: '1500-01-01', forest: sherwood });
+        db.trees.insert({ name: 'Robin Hood Oak', planted: '1600-03-15', forest: sherwood });
+        db.trees.insert({ name: 'Dead Elm', planted: '1700-06-01', alive: false, forest: sherwood });
 
-        db.trees.insert({ name: 'Brazil Nut', planted: '1800-01-01', forestId: amazon.id } as any);
-        db.trees.insert({ name: 'Rubber Tree', planted: '1850-05-20', forestId: amazon.id } as any);
-        db.trees.insert({ name: 'Kapok', planted: '1900-09-10', forestId: amazon.id } as any);
+        db.trees.insert({ name: 'Brazil Nut', planted: '1800-01-01', forest: amazon });
+        db.trees.insert({ name: 'Rubber Tree', planted: '1850-05-20', forest: amazon });
+        db.trees.insert({ name: 'Kapok', planted: '1900-09-10', forest: amazon });
 
-        db.trees.insert({ name: 'Silver Fir', planted: '1920-04-01', forestId: blackForest.id } as any);
-        db.trees.insert({ name: 'Norway Spruce', planted: '1950-07-15', forestId: blackForest.id } as any);
+        db.trees.insert({ name: 'Silver Fir', planted: '1920-04-01', forest: blackForest });
+        db.trees.insert({ name: 'Norway Spruce', planted: '1950-07-15', forest: blackForest });
 
         expect(db.forests.select().count()).toBe(3);
         expect(db.trees.select().count()).toBe(8);
+    });
+
+    test('query with entity-based WHERE — get()', () => {
+        const sherwood = db.forests.get({ name: 'Sherwood' })!;
+        const tree = db.trees.get({ forest: sherwood });
+        expect(tree).not.toBeNull();
+        expect(tree!.name).toBe('Major Oak');
+    });
+
+    test('query with entity-based WHERE — select().where()', () => {
+        const amazon = db.forests.get({ name: 'Amazon' })!;
+        const amazonTrees = db.trees.select().where({ forest: amazon }).all();
+        expect(amazonTrees.length).toBe(3);
+        expect(amazonTrees.map(t => t.name)).toContain('Brazil Nut');
     });
 });
 

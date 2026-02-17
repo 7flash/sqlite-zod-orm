@@ -142,3 +142,35 @@ test('compileProxyQuery: JOIN between two tables', () => {
     );
     expect(sql).toContain('JOIN');
 });
+
+test('compileProxyQuery: relationship field auto-resolves to FK column', () => {
+    const { z } = require('zod');
+
+    const UserSchema = z.object({ name: z.string() });
+    const PostSchema = z.object({
+        title: z.string(),
+        user: z.lazy(() => UserSchema).optional(),
+    });
+
+    const schemas: any = {
+        users: UserSchema,
+        posts: PostSchema,
+    };
+
+    const { proxy, aliasMap } = createContextProxy(schemas);
+    const u = (proxy as any).users;
+    const p = (proxy as any).posts;
+
+    // p.user should resolve to 'userId' column (not 'user')
+    expect(p.user.column).toBe('userId');
+
+    const { sql } = compileProxyQuery(
+        {
+            select: { name: u.name, title: p.title },
+            join: [p.user, u.id],
+        },
+        aliasMap,
+    );
+    expect(sql).toContain('JOIN');
+    expect(sql).toContain('"userId"');
+});

@@ -10,6 +10,7 @@ export type {
     SchemaMap, DatabaseOptions, Relationship,
     EntityAccessor, TypedAccessors, AugmentedEntity, UpdateBuilder,
     InferSchema, EntityData, IndexDef,
+    ProxyColumns, ColumnRef,
 } from './types';
 
 export { z } from 'zod';

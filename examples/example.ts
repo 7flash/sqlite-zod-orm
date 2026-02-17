@@ -81,6 +81,7 @@ console.log('Get by filter:', admin?.name); // → 'Alice'
 
 // Update by ID
 alice.update({ score: 200 });
+
 console.log('Updated score:', db.users.get(1)?.score); // → 200
 
 // Fluent update with WHERE
@@ -130,14 +131,21 @@ const tolstoy = db.authors.insert({ name: 'Leo Tolstoy', country: 'Russia' });
 const dostoevsky = db.authors.insert({ name: 'Fyodor Dostoevsky', country: 'Russia' });
 const kafka = db.authors.insert({ name: 'Franz Kafka', country: 'Czech Republic' });
 
-// Insert books with FK (authorId auto-created from z.lazy)
-db.books.insert({ title: 'War and Peace', year: 1869, pages: 1225, authorId: tolstoy.id } as any);
-db.books.insert({ title: 'Anna Karenina', year: 1878, pages: 864, authorId: tolstoy.id } as any);
-db.books.insert({ title: 'Crime and Punishment', year: 1866, pages: 671, authorId: dostoevsky.id } as any);
-db.books.insert({ title: 'The Brothers Karamazov', year: 1880, pages: 796, authorId: dostoevsky.id } as any);
-db.books.insert({ title: 'The Trial', year: 1925, pages: 255, authorId: kafka.id } as any);
+// Insert books — pass the entity directly, ORM resolves to FK
+db.books.insert({ title: 'War and Peace', year: 1869, pages: 1225, author: tolstoy });
+db.books.insert({ title: 'Anna Karenina', year: 1878, pages: 864, author: tolstoy });
+db.books.insert({ title: 'Crime and Punishment', year: 1866, pages: 671, author: dostoevsky });
+db.books.insert({ title: 'The Brothers Karamazov', year: 1880, pages: 796, author: dostoevsky });
+db.books.insert({ title: 'The Trial', year: 1925, pages: 255, author: kafka });
 
 console.log(`Seeded ${db.authors.select().count()} authors, ${db.books.select().count()} books`);
+
+// Query with entity reference — { author: tolstoy } → WHERE authorId = tolstoy.id
+const tolstoyBooks = db.books.select().where({ author: tolstoy }).all();
+console.log('Tolstoy books:', tolstoyBooks.map(b => b.title));
+
+const firstDostoevsky = db.books.get({ author: dostoevsky });
+console.log('First Dostoevsky:', firstDostoevsky?.title);
 
 // =============================================================================
 // 6. FLUENT JOIN — select().join() with auto FK inference
@@ -177,11 +185,11 @@ console.log('Page 1 (2 books):', page1.map((b: any) => b.title));
 
 console.log('\n── 5. Proxy Callback (SQL-like) ──');
 
-const russianBooks = db.query((c: any) => {
+const russianBooks = db.query((c) => {
     const { authors: a, books: b } = c;
     return {
         select: { author: a.name, book: b.title, year: b.year },
-        join: [[b.authorId, a.id]],
+        join: [[b.author, a.id]],
         where: { [a.country]: 'Russia' },
         orderBy: { [b.year]: 'asc' },
     };
@@ -192,11 +200,11 @@ for (const row of russianBooks) {
     console.log(`  ${(row as any).year} - ${(row as any).book} by ${(row as any).author}`);
 }
 
-const latest = db.query((c: any) => {
+const latest = db.query((c) => {
     const { books: b, authors: a } = c;
     return {
         select: { title: b.title, author: a.name, year: b.year },
-        join: [[b.authorId, a.id]],
+        join: [[b.author, a.id]],
         orderBy: { [b.year]: 'desc' },
         limit: 2,
     };

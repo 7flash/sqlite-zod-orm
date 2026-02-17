@@ -69,3 +69,25 @@ export type EntityAccessor<S extends z.ZodType<any>> = {
 export type TypedAccessors<T extends SchemaMap> = {
     [K in keyof T]: EntityAccessor<T[K]>;
 };
+
+// --- Proxy query column types ---
+
+import type { ColumnNode } from './proxy-query';
+
+/**
+ * ColumnRef is the type exposed to users in proxy query callbacks.
+ * `& string` is a brand that lets TS accept column refs as computed property
+ * keys in WHERE / orderBy objects, matching the runtime `toString()` behavior.
+ */
+export type ColumnRef = ColumnNode & string;
+
+/**
+ * Full proxy column map for a schema type T.
+ * Declared fields get autocomplete; the index signature allows any runtime column
+ * (e.g. FK fields like `authorId`) to be accessed without errors.
+ */
+export type ProxyColumns<T> = Required<{ [K in keyof T]: ColumnRef }> & {
+    id: ColumnRef;
+    [k: string]: ColumnRef;
+};
+

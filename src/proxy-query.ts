@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import type { z } from 'zod';
 
 // ---------- SQL Identifier Quoting ----------
 
@@ -51,26 +51,30 @@ export class ColumnNode {
 /**
  * Creates a proxy representing a table with a given alias.
  * Property access returns ColumnNode objects.
+ * Relationship fields (z.lazy) are auto-resolved to FK column names.
  */
 function createTableProxy(
     tableName: string,
     alias: string,
     columns: Set<string>,
+    relationshipFields: Set<string>,
 ): Record<string, ColumnNode> {
     return new Proxy({} as Record<string, ColumnNode>, {
         get(_target, prop: string): ColumnNode | undefined {
             if (prop === Symbol.toPrimitive as any || prop === 'toString' || prop === 'valueOf') {
                 return undefined;
             }
-            // Allow any property access — the column may be inferred or wildcard
-            return new ColumnNode(tableName, prop, alias);
+            // Resolve relationship fields: b.author → ColumnNode for 'authorId'
+            const column = relationshipFields.has(prop) ? `${prop}Id` : prop;
+            return new ColumnNode(tableName, column, alias);
         },
         ownKeys() {
             return [...columns];
         },
         getOwnPropertyDescriptor(_target, prop) {
             if (columns.has(prop as string)) {
-                return { configurable: true, enumerable: true, value: new ColumnNode(tableName, prop as string, alias) };
+                const column = relationshipFields.has(prop as string) ? `${prop as string}Id` : prop as string;
+                return { configurable: true, enumerable: true, value: new ColumnNode(tableName, column, alias) };
             }
             return undefined;
         },
@@ -100,13 +104,29 @@ export function createContextProxy(
             if (typeof tableName !== 'string') return undefined;
 
             const schema = schemas[tableName];
-            const columns = schema
-                ? new Set(Object.keys((schema as unknown as z.ZodObject<any>).shape))
-                : new Set<string>();
+            const shape = schema
+                ? (schema as unknown as z.ZodObject<any>).shape
+                : {};
+            const columns = new Set(Object.keys(shape));
+
+            // Detect z.lazy() fields (belongs-to relationships)
+            // Use _def.typeName instead of instanceof to avoid ESM/CJS boundary issues
+            const relationshipFields = new Set<string>();
+            for (const [key, fieldSchema] of Object.entries(shape)) {
+                let inner: any = fieldSchema;
+                if (inner?._def?.typeName === 'ZodOptional') inner = inner._def.innerType;
+                if (inner?._def?.typeName === 'ZodLazy') {
+                    // Only belongs-to (non-array lazy fields)
+                    const resolved = inner._def.getter();
+                    if (resolved?._def?.typeName !== 'ZodArray') {
+                        relationshipFields.add(key);
+                    }
+                }
+            }
 
             aliasCounter++;
             const alias = `t${aliasCounter}`;
-            const tableProxy = createTableProxy(tableName, alias, columns);
+            const tableProxy = createTableProxy(tableName, alias, columns, relationshipFields);
 
             // Track alias
             const entries = aliases.get(tableName) || [];
@@ -122,14 +142,16 @@ export function createContextProxy(
 
 // ---------- Query Result Shape ----------
 
+type AnyColumn = ColumnNode | (ColumnNode & string);
+
 export interface ProxyQueryResult {
-    select: Record<string, ColumnNode>;
-    join?: [ColumnNode, ColumnNode] | [ColumnNode, ColumnNode][];
+    select: Record<string, AnyColumn | undefined>;
+    join?: [AnyColumn | undefined, AnyColumn | undefined] | [AnyColumn | undefined, AnyColumn | undefined][];
     where?: Record<string, any>;
     orderBy?: Record<string, 'asc' | 'desc'>;
     limit?: number;
     offset?: number;
-    groupBy?: ColumnNode[];
+    groupBy?: (AnyColumn | undefined)[];
 }
 
 // ---------- Query Compiler ----------
@@ -282,7 +304,7 @@ export function compileProxyQuery(
 
     // ---------- GROUP BY ----------
     if (queryResult.groupBy && queryResult.groupBy.length > 0) {
-        const parts = queryResult.groupBy.map(col => qRef(col.alias, col.column));
+        const parts = queryResult.groupBy.filter(Boolean).map(col => qRef(col!.alias, col!.column));
         sql += ` GROUP BY ${parts.join(', ')}`;
     }
 
