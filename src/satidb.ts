@@ -4,6 +4,14 @@ import { z } from 'zod';
 import { QueryBuilder } from './query-builder';
 import { executeProxyQuery, type ProxyQueryResult } from './proxy-query';
 
+/** Fluent update builder: `db.users.update({ level: 10 }).where({ name: 'Alice' }).exec()` */
+export type UpdateBuilder<T> = {
+  /** Set filter conditions for the update */
+  where: (conditions: Record<string, any>) => UpdateBuilder<T>;
+  /** Execute the update and return the number of rows affected */
+  exec: () => number;
+};
+
 type ZodType = z.ZodTypeAny;
 type SchemaMap = Record<string, z.ZodType<any>>;
 
@@ -51,7 +59,8 @@ type AugmentedEntity<S extends z.ZodType<any>> = InferSchema<S> & {
 type OneToManyRelationship<S extends z.ZodType<any>> = {
   insert: (data: EntityData<S>) => AugmentedEntity<S>;
   get: (conditions: number | Partial<InferSchema<S>>) => AugmentedEntity<S> | null;
-  update: ((id: number, data: Partial<EntityData<S>>) => AugmentedEntity<S> | null) & ((filter: Partial<InferSchema<S>>, data: Partial<EntityData<S>>) => AugmentedEntity<S> | null);
+  /** Update by ID: `update(id, data)`. Fluent: `update(data).where(filter).exec()` */
+  update: ((id: number, data: Partial<EntityData<S>>) => AugmentedEntity<S> | null) & ((data: Partial<EntityData<S>>) => UpdateBuilder<AugmentedEntity<S>>);
   upsert: (conditions?: Partial<InferSchema<S>>, data?: Partial<InferSchema<S>>) => AugmentedEntity<S>;
   delete: (id?: number) => void;
   subscribe: (event: 'insert' | 'update' | 'delete', callback: (data: AugmentedEntity<S>) => void) => void;
@@ -62,7 +71,8 @@ type OneToManyRelationship<S extends z.ZodType<any>> = {
 type EntityAccessor<S extends z.ZodType<any>> = {
   insert: (data: EntityData<S>) => AugmentedEntity<S>;
   get: (conditions: number | Partial<InferSchema<S>>) => AugmentedEntity<S> | null;
-  update: ((id: number, data: Partial<EntityData<S>>) => AugmentedEntity<S> | null) & ((filter: Partial<InferSchema<S>>, data: Partial<EntityData<S>>) => AugmentedEntity<S> | null);
+  /** Update by ID: `update(id, data)`. Fluent: `update(data).where(filter).exec()` */
+  update: ((id: number, data: Partial<EntityData<S>>) => AugmentedEntity<S> | null) & ((data: Partial<EntityData<S>>) => UpdateBuilder<AugmentedEntity<S>>);
   upsert: (conditions?: Partial<InferSchema<S>>, data?: Partial<InferSchema<S>>) => AugmentedEntity<S>;
   delete: (id: number) => void;
   subscribe: (event: 'insert' | 'update' | 'delete', callback: (data: AugmentedEntity<S>) => void) => void;
@@ -105,7 +115,12 @@ class _SatiDB<Schemas extends SchemaMap> extends EventEmitter {
       const accessor: EntityAccessor<Schemas[typeof key]> = {
         insert: (data) => this.insert(entityName, data),
         get: (conditions) => this.get(entityName, conditions),
-        update: (idOrFilter, data) => this.updateWithFilter(entityName, idOrFilter, data),
+        update: (idOrData: any, data?: any) => {
+          // update(id, data) → direct update by ID
+          if (typeof idOrData === 'number') return this.update(entityName, idOrData, data);
+          // update(data) → return UpdateBuilder
+          return this._createUpdateBuilder(entityName, idOrData);
+        },
         upsert: (conditions, data) => this.upsert(entityName, data, conditions),
         delete: (id) => this.delete(entityName, id),
         subscribe: (event, callback) => this.subscribe(event, entityName, callback),
@@ -971,6 +986,57 @@ class _SatiDB<Schemas extends SchemaMap> extends EventEmitter {
     return this.update(entityName, entity.id, data);
   }
 
+  /**
+ * Execute UPDATE ... SET ... WHERE in a single SQL query.
+ * Returns the number of rows affected.
+ */
+  private _updateWhere(entityName: string, data: Record<string, any>, conditions: Record<string, any>): number {
+    const schema = this.schemas[entityName];
+    const validatedData = asZodObject(schema!).partial().parse(data);
+    const transformedData = this.transformForStorage(validatedData);
+    if (Object.keys(transformedData).length === 0) return 0;
+
+    const { clause: whereClause, values: whereValues } = this.buildWhereClause(conditions);
+    if (!whereClause) throw new Error('update().where() requires at least one condition');
+
+    const setCols = Object.keys(transformedData);
+    const setClause = setCols.map(key => `${key} = ?`).join(', ');
+    const setValues = setCols.map(key => transformedData[key]);
+
+    const sql = `UPDATE ${entityName} SET ${setClause} ${whereClause}`;
+    const result = this.db.query(sql).run(...setValues, ...whereValues);
+
+    // Fire events for affected rows
+    const affected = (result as any).changes ?? 0;
+    if (affected > 0 && (this.subscriptions.update[entityName]?.length || this.options.changeTracking)) {
+      const updated = this.find(entityName, conditions);
+      for (const entity of updated) {
+        this.emit('update', entityName, entity);
+        if (this.subscriptions.update[entityName]) {
+          this.subscriptions.update[entityName].forEach(cb => cb(entity));
+        }
+      }
+    }
+    return affected;
+  }
+
+  /**
+   * Create a fluent UpdateBuilder: `update(data).where(filter).exec()`
+   */
+  private _createUpdateBuilder(entityName: string, data: Record<string, any>): UpdateBuilder<any> {
+    let _conditions: Record<string, any> = {};
+
+    const builder: UpdateBuilder<any> = {
+      where: (conditions: Record<string, any>) => {
+        _conditions = { ..._conditions, ...conditions };
+        return builder;
+      },
+      exec: () => {
+        return this._updateWhere(entityName, data, _conditions);
+      },
+    };
+    return builder;
+  }
   private upsert<T extends Record<string, any>>(entityName: string, data: Omit<T, 'id'> & { id?: string }, conditions: Partial<T> = {}): AugmentedEntity<any> {
     const schema = this.schemas[entityName];
     const processedData = this.preprocessRelationshipFields(schema!, data);

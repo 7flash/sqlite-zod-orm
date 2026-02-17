@@ -185,8 +185,7 @@ export function createGalaxyDb(dbPath: string) {
     }
 
     function updateServerBalance(serverId: string, newBalance: number) {
-        const server = db.servers.select().where({ serverId }).get();
-        if (server) db.servers.update(server.id, { balance: newBalance });
+        db.servers.update({ balance: newBalance }).where({ serverId }).exec();
     }
 
     // =========================================================================
@@ -194,22 +193,17 @@ export function createGalaxyDb(dbPath: string) {
     // =========================================================================
 
     function updateJobStatus(jobId: string, status: string, completedAt?: number) {
-        const job = db.jobs.select().where({ jobId }).get();
-        if (job) {
-            const data: Record<string, any> = { status };
-            if (completedAt) data.completedAt = completedAt;
-            db.jobs.update(job.id, data);
-        }
+        const data: Record<string, any> = { status };
+        if (completedAt) data.completedAt = completedAt;
+        db.jobs.update(data).where({ jobId }).exec();
     }
 
     function updateJobGenerationCount(jobId: string) {
-        const job = db.jobs.select().where({ jobId }).get();
-        if (!job) return;
         const count = db.generations.select().where({ jobId }).count();
-        db.jobs.update(job.id, {
+        db.jobs.update({
             generationCount: count,
             lastGenerationAt: Date.now(),
-        });
+        }).where({ jobId }).exec();
     }
 
     // =========================================================================
