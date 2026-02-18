@@ -235,4 +235,4 @@ separator('SUMMARY');
 console.log('Indexes dramatically speed up reads (10-100x for point lookups).');
 console.log('Write overhead is modest (~30-50% for 4 indexes).');
 console.log('For read-heavy workloads (typical ORM usage), indexes are essential.');
-console.log('SatiDB auto-creates them from the { indexes } config option.');
+console.log('sqlite-zod-orm auto-creates them from the { indexes } config option.');
