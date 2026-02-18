@@ -203,20 +203,18 @@ test('QueryBuilder: thenable resolves to .all()', async () => {
 
 test('QueryBuilder: subscribe fires callback immediately and on change', async () => {
     let callCount = 0;
-    let counter = 0;
+    let seq = 0;
 
     const executor = (sql: string, params: any[], raw: boolean) => {
-        // Fingerprint query returns changing count on 2nd call
-        if (sql.includes('_cnt')) {
-            counter++;
-            return [{ _cnt: counter, _max: counter }];
-        }
         return [{ id: 1, name: 'Alice', age: 30 }];
     };
     const singleExecutor = () => null;
 
+    // revisionGetter simulates trigger seq bumping on each call
     const qb = new QueryBuilder<{ id: number; name: string; age: number }>(
         'users', executor, singleExecutor,
+        null, null,
+        () => `0:${++seq}`,  // revision changes each read → simulates external writes
     );
 
     const unsub = qb.subscribe(() => { callCount++; }, { interval: 30 });
@@ -224,7 +222,7 @@ test('QueryBuilder: subscribe fires callback immediately and on change', async (
     // Immediate call
     expect(callCount).toBe(1);
 
-    // Wait for a couple ticks — fingerprint keeps changing so callback fires each time
+    // Wait for a couple ticks — revision keeps changing so callback fires each time
     await new Promise(r => setTimeout(r, 100));
     expect(callCount).toBeGreaterThan(1);
 
@@ -239,23 +237,22 @@ test('QueryBuilder: subscribe does not fire when fingerprint unchanged', async (
     let callCount = 0;
 
     const executor = (sql: string) => {
-        // Always returns same fingerprint
-        if (sql.includes('_cnt')) {
-            return [{ _cnt: 5, _max: 10 }];
-        }
         return [{ id: 1 }];
     };
     const singleExecutor = () => null;
 
+    // Static revision → no changes detected
     const qb = new QueryBuilder<{ id: number }>(
         'users', executor, singleExecutor,
+        null, null,
+        () => '0:42',  // never changes
     );
 
     const unsub = qb.subscribe(() => { callCount++; }, { interval: 30 });
 
     expect(callCount).toBe(1); // immediate
     await new Promise(r => setTimeout(r, 100));
-    // Fingerprint never changed, so no additional calls
+    // Revision never changed, so no additional calls
     expect(callCount).toBe(1);
 
     unsub();

@@ -505,51 +505,28 @@ export class QueryBuilder<T extends Record<string, any>> {
     ): () => void {
         const { interval = this.defaultPollInterval, immediate = true } = options;
 
-        // Build the fingerprint SQL (COUNT + MAX(id)) using the same WHERE
-        const fingerprintSQL = this.buildFingerprintSQL();
-        let lastCount: number | null = null;
-        let lastMax: number | null = null;
-        let lastInMemoryRev: string | null = null;
+        let lastRevision: string | null = null;
         let stopped = false;
 
         const poll = async () => {
             if (stopped) return;
             try {
-                // Two-signal change detection:
-                //   1. In-memory revision (table-specific) → catches same-process writes
-                //   2. COUNT+MAX fingerprint (table-specific) → catches cross-process inserts/deletes
-                //
-                // Note: cross-process UPDATEs that don't change count/max are only caught
-                // by PRAGMA data_version, which is database-wide. We accept this tradeoff
-                // to avoid re-querying on writes to OTHER tables.
+                // Single check: revision combines in-memory counter (same-process)
+                // + trigger-based seq from _satidb_changes (cross-process).
+                // Both are table-specific — no false positives from other tables.
                 const rev = this.revisionGetter?.() ?? '0';
 
-                // Fast path: in-memory revision changed → our CRUD wrote to this table
-                const inMemoryChanged = rev !== lastInMemoryRev;
-                lastInMemoryRev = rev;
-
-                // Check table-specific fingerprint (COUNT + MAX(id))
-                const fpRows = this.executor(fingerprintSQL.sql, fingerprintSQL.params, true);
-                const fpRow = fpRows[0] as any;
-                const cnt = fpRow?._cnt ?? 0;
-                const max = fpRow?._max ?? 0;
-                const fpChanged = cnt !== lastCount || max !== lastMax;
-                lastCount = cnt;
-                lastMax = max;
-
-                // Fire callback only if THIS table actually changed
-                if (inMemoryChanged || fpChanged) {
+                if (rev !== lastRevision) {
+                    lastRevision = rev;
                     const rows = this.all();
                     await callback(rows);
                 }
             } catch {
                 // Silently skip on error (table might be in transition)
             }
-            // Self-scheduling: next poll only after this one completes
             if (!stopped) setTimeout(poll, interval);
         };
 
-        // Immediate first execution
         if (immediate) {
             poll();
         } else {
@@ -668,12 +645,6 @@ export class QueryBuilder<T extends Record<string, any>> {
         return { sql: '', params: [] };
     }
 
-    /** Build a lightweight fingerprint query (COUNT + MAX(id)) that shares the same WHERE clause. */
-    private buildFingerprintSQL(): { sql: string; params: any[] } {
-        const where = this.buildWhereClause();
-        const sql = `SELECT COUNT(*) as _cnt, MAX(id) as _max FROM ${this.tableName}${where.sql ? ` WHERE ${where.sql}` : ''}`;
-        return { sql, params: where.params };
-    }
 
     // ---------- Thenable (async/await support) ----------
 

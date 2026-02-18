@@ -31,8 +31,8 @@ class _Database<Schemas extends SchemaMap> {
     private options: DatabaseOptions;
     private pollInterval: number;
 
-    /** In-memory revision counter per table — bumps on every write (insert/update/delete).
-     *  Used by QueryBuilder.subscribe() fingerprint to detect ALL changes with zero overhead. */
+    /** In-memory revision counter per table — same-process fast path.
+     *  Complements the trigger-based _satidb_changes table for cross-process detection. */
     private _revisions: Record<string, number> = {};
 
     constructor(dbFile: string, schemas: Schemas, options: DatabaseOptions = {}) {
@@ -44,6 +44,7 @@ class _Database<Schemas extends SchemaMap> {
         this.pollInterval = options.pollInterval ?? 500;
         this.relationships = options.relations ? parseRelationsConfig(options.relations, schemas) : [];
         this.initializeTables();
+        this.initializeChangeTracking();
         this.runMigrations();
         if (options.indexes) this.createIndexes(options.indexes);
 
@@ -89,6 +90,36 @@ class _Database<Schemas extends SchemaMap> {
         }
     }
 
+    /**
+     * Initialize per-table change tracking using triggers.
+     *
+     * Creates a `_satidb_changes` table with one row per user table and a monotonic `seq` counter.
+     * INSERT/UPDATE/DELETE triggers on each user table auto-increment the seq.
+     * This enables table-specific, cross-process change detection — no PRAGMA data_version needed.
+     */
+    private initializeChangeTracking(): void {
+        this.db.run(`CREATE TABLE IF NOT EXISTS _satidb_changes (
+            tbl TEXT PRIMARY KEY,
+            seq INTEGER NOT NULL DEFAULT 0
+        )`);
+
+        for (const entityName of Object.keys(this.schemas)) {
+            // Ensure a row exists for this table
+            this.db.run(`INSERT OR IGNORE INTO _satidb_changes (tbl, seq) VALUES (?, 0)`, entityName);
+
+            // Create triggers (idempotent via IF NOT EXISTS)
+            for (const op of ['insert', 'update', 'delete'] as const) {
+                const triggerName = `_satidb_${entityName}_${op}`;
+                const event = op.toUpperCase();
+                this.db.run(`CREATE TRIGGER IF NOT EXISTS ${triggerName}
+                    AFTER ${event} ON ${entityName}
+                    BEGIN
+                        UPDATE _satidb_changes SET seq = seq + 1 WHERE tbl = '${entityName}';
+                    END`);
+            }
+        }
+    }
+
     private runMigrations(): void {
         for (const [entityName, schema] of Object.entries(this.schemas)) {
             const existingColumns = this.db.query(`PRAGMA table_info(${entityName})`).all() as any[];
@@ -115,28 +146,27 @@ class _Database<Schemas extends SchemaMap> {
     }
 
     // ===========================================================================
-    // Revision Tracking (in-memory + cross-process)
+    // Revision Tracking (trigger-based + in-memory fast path)
     // ===========================================================================
 
-    /** Bump the revision counter for a table. Called on every write. */
+    /** Bump the in-memory revision counter. Called by our CRUD methods (same-process fast path). */
     private _bumpRevision(entityName: string): void {
         this._revisions[entityName] = (this._revisions[entityName] ?? 0) + 1;
     }
 
     /**
-     * Get a composite revision string for a table.
+     * Get the change sequence for a table.
      *
-     * Combines two signals:
-     *  - In-memory counter: catches writes from THIS process (our CRUD methods bump it)
-     *  - PRAGMA data_version: catches writes from OTHER processes (SQLite bumps it
-     *    whenever another connection commits, but NOT for the current connection)
+     * Reads from `_satidb_changes` — a per-table seq counter bumped by triggers
+     * on every INSERT/UPDATE/DELETE, regardless of which connection performed the write.
      *
-     * Together they detect ALL changes regardless of source, with zero disk overhead.
+     * Combined with the in-memory counter for instant same-process detection.
      */
     public _getRevision(entityName: string): string {
         const rev = this._revisions[entityName] ?? 0;
-        const dataVersion = (this.db.query('PRAGMA data_version').get() as any)?.data_version ?? 0;
-        return `${rev}:${dataVersion}`;
+        const row = this.db.query('SELECT seq FROM _satidb_changes WHERE tbl = ?').get(entityName) as any;
+        const seq = row?.seq ?? 0;
+        return `${rev}:${seq}`;
     }
 
     // ===========================================================================
