@@ -403,62 +403,49 @@ describe('Subscribe (smart polling)', () => {
     });
 });
 // =============================================================================
-// 11b. SUBSCRIBE WITH WATERMARK — detecting new inserts via .subscribe()
+// 11b. ROW STREAM — .each()
 // =============================================================================
 
-describe('Subscribe with watermark (replaces .on)', () => {
-    test('detects new inserts via $gt watermark', async () => {
-        const allBefore = db.forests.select().orderBy('id', 'desc').all();
-        const maxBefore = allBefore.length > 0 ? allBefore[0].id : 0;
+describe('Row stream (.each)', () => {
+    test('emits new inserts individually in order', async () => {
         const received: string[] = [];
+        const unsub = db.forests.select().each((forest) => {
+            received.push(forest.name);
+        }, { interval: 30 });
 
-        const unsub = db.forests.select()
-            .where({ id: { $gt: maxBefore } })
-            .orderBy('id', 'asc')
-            .subscribe((rows) => {
-                for (const row of rows) {
-                    if (!received.includes(row.name)) received.push(row.name);
-                }
-            }, { interval: 30 });
-
-        db.forests.insert({ name: 'SubTest1', address: 'A' });
-        db.forests.insert({ name: 'SubTest2', address: 'B' });
+        db.forests.insert({ name: 'EachTest1', address: 'A' });
+        db.forests.insert({ name: 'EachTest2', address: 'B' });
         await new Promise(r => setTimeout(r, 100));
-        db.forests.insert({ name: 'SubTest3', address: 'C' });
+        db.forests.insert({ name: 'EachTest3', address: 'C' });
         await new Promise(r => setTimeout(r, 100));
 
         unsub();
 
-        expect(received).toContain('SubTest1');
-        expect(received).toContain('SubTest2');
-        expect(received).toContain('SubTest3');
-        expect(received.indexOf('SubTest1')).toBeLessThan(received.indexOf('SubTest2'));
-        expect(received.indexOf('SubTest2')).toBeLessThan(received.indexOf('SubTest3'));
+        expect(received).toContain('EachTest1');
+        expect(received).toContain('EachTest2');
+        expect(received).toContain('EachTest3');
+        expect(received.indexOf('EachTest1')).toBeLessThan(received.indexOf('EachTest2'));
+        expect(received.indexOf('EachTest2')).toBeLessThan(received.indexOf('EachTest3'));
     });
 
-    test('$gt watermark ignores pre-existing rows', async () => {
+    test('does not emit rows that existed before subscription', async () => {
         const existingCount = db.forests.select().count();
         expect(existingCount).toBeGreaterThan(0);
 
-        const allBefore2 = db.forests.select().orderBy('id', 'desc').all();
-        const maxBefore = allBefore2.length > 0 ? allBefore2[0].id : 0;
         const received: any[] = [];
-
-        const unsub = db.forests.select()
-            .where({ id: { $gt: maxBefore } })
-            .subscribe((rows) => {
-                for (const row of rows) received.push(row);
-            }, { interval: 30 });
+        const unsub = db.forests.select().each((forest) => {
+            received.push(forest);
+        }, { interval: 30 });
 
         // Wait — no new inserts
         await new Promise(r => setTimeout(r, 100));
         expect(received.length).toBe(0);
 
         // Now insert one
-        db.forests.insert({ name: 'SubTestNew', address: 'New' });
+        db.forests.insert({ name: 'EachTestNew', address: 'New' });
         await new Promise(r => setTimeout(r, 100));
         expect(received.length).toBe(1);
-        expect(received[0].name).toBe('SubTestNew');
+        expect(received[0].name).toBe('EachTestNew');
 
         unsub();
     });

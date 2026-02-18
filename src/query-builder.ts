@@ -540,6 +540,65 @@ export class QueryBuilder<T extends Record<string, any>> {
         };
     }
 
+    /**
+     * Stream new rows one at a time via a watermark (last seen id).
+     *
+     * Unlike `.subscribe()` (which gives you an array snapshot), `.each()`
+     * calls your callback once per new row, in insertion order. The SQL
+     * `WHERE id > watermark` is rebuilt each poll with the latest value,
+     * so it's always O(new_rows) — not O(table_size).
+     *
+     * ```ts
+     * const unsub = db.messages.select().each((msg) => {
+     *     console.log('New:', msg.text);
+     * });
+     * ```
+     *
+     * @param callback  Called once per new row. Async callbacks are awaited.
+     * @param options   `interval` in ms (default: pollInterval).
+     * @returns Unsubscribe function.
+     */
+    each(
+        callback: (row: T) => void | Promise<void>,
+        options: { interval?: number } = {},
+    ): () => void {
+        const { interval = this.defaultPollInterval } = options;
+
+        // Initialize watermark to current max id
+        const maxRows = this.executor(
+            `SELECT MAX(id) as _max FROM ${this.tableName}`, [], true
+        );
+        let lastMaxId: number = (maxRows[0] as any)?._max ?? 0;
+        let lastRevision = this.revisionGetter?.() ?? '0';
+        let stopped = false;
+
+        const poll = async () => {
+            if (stopped) return;
+
+            const rev = this.revisionGetter?.() ?? '0';
+            if (rev !== lastRevision) {
+                lastRevision = rev;
+
+                // Fetch only new rows since watermark — O(new_rows)
+                const newRows = this.executor(
+                    `SELECT * FROM ${this.tableName} WHERE id > ? ORDER BY id ASC`,
+                    [lastMaxId], true
+                );
+
+                for (const rawRow of newRows) {
+                    if (stopped) return;
+                    await callback(rawRow as unknown as T);
+                    lastMaxId = (rawRow as any).id;
+                }
+            }
+
+            if (!stopped) setTimeout(poll, interval);
+        };
+
+        setTimeout(poll, interval);
+        return () => { stopped = true; };
+    }
+
     /** Build a lightweight fingerprint query (COUNT + MAX(id)) that shares the same WHERE clause. */
     private buildFingerprintSQL(): { sql: string; params: any[] } {
         const params: any[] = [];

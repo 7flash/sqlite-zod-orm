@@ -1,10 +1,10 @@
 /**
- * messages-demo.ts — Reactivity demo: .subscribe()
+ * messages-demo.ts — Reactivity demo
  *
- * .subscribe() is the single reactive primitive. Two patterns:
+ * Two reactive primitives:
  *
- *   Snapshot:  .select().subscribe(cb)           → full result on any change
- *   Watermark: .select().where({ id: { $gt } }) → only new rows since X
+ *   .subscribe(cb)  → Snapshot (full result array on any change)
+ *   .each(cb)       → Row stream (one row at a time, watermark-based, O(new_rows))
  *
  * Writer uses a separate SQLite connection to prove cross-process detection.
  *
@@ -34,28 +34,19 @@ const db = new Database(DB_PATH, {
 });
 
 console.log('╔══════════════════════════════════════════════════════╗');
-console.log('║   Reactivity Demo: .subscribe()                     ║');
+console.log('║   Reactivity Demo: .each() + .subscribe()           ║');
 console.log('╚══════════════════════════════════════════════════════╝');
 console.log();
 
-// ── Pattern 1: Watermark — new rows only ─────────────────────
+// ── .each() — row stream (one row at a time, watermark-based) ─
 
-let watermark = 0;
-let newCount = 0;
-const unsubNew = db.messages.select()
-    .where({ id: { $gt: watermark } })
-    .orderBy('id', 'asc')
-    .subscribe((rows) => {
-        for (const row of rows) {
-            if (row.id > watermark) {
-                newCount++;
-                console.log(`  📩 [watermark] New #${row.id}: ${row.author} says "${row.text}"`);
-                watermark = row.id;
-            }
-        }
-    }, { interval: 150 });
+let eachCount = 0;
+const unsubEach = db.messages.select().each((msg) => {
+    eachCount++;
+    console.log(`  📩 .each() → New #${msg.id}: ${msg.author} says "${msg.text}"`);
+}, { interval: 150 });
 
-// ── Pattern 2: Snapshot — full view on any change ────────────
+// ── .subscribe() — snapshot (full view on any change) ────────
 
 let snapCount = 0;
 const unsubSnap = db.messages.select()
@@ -66,7 +57,7 @@ const unsubSnap = db.messages.select()
             const e = m.edited ? '✏️' : '';
             return `${m.author}:"${m.text}"${e}`;
         }).join(', ');
-        console.log(`  📋 [snapshot]  #${snapCount} (${messages.length} msgs): [${summary}]`);
+        console.log(`  📋 .subscribe() → Snapshot #${snapCount} (${messages.length} msgs): [${summary}]`);
         console.log();
     }, { interval: 150 });
 
@@ -103,16 +94,15 @@ for (const [delay, action] of actions) {
 }
 
 setTimeout(() => {
-    unsubNew();
+    unsubEach();
     unsubSnap();
     writer.close();
     console.log('══════════════════════════════════════════════════════');
-    console.log(`✅ [watermark] detected ${newCount} new rows`);
-    console.log(`   [snapshot]  fired ${snapCount} snapshot updates`);
+    console.log(`✅ .each()      detected ${eachCount} new rows (watermark-based, O(new))`);
+    console.log(`   .subscribe() fired ${snapCount} snapshot updates (fingerprint-based)`);
     console.log();
-    console.log('   One primitive: .subscribe()');
-    console.log('   Watermark pattern: .where({ id: { $gt: N } }) = new rows');
-    console.log('   Snapshot pattern:  .select().subscribe()       = full view');
+    console.log('   .each()      = row stream, one at a time');
+    console.log('   .subscribe() = snapshot, full result array');
 
     try {
         if (existsSync(DB_PATH)) unlinkSync(DB_PATH);
