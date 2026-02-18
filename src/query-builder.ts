@@ -479,6 +479,9 @@ export class QueryBuilder<T extends Record<string, any>> {
      * in-memory revision counter to detect ALL changes (inserts, updates, deletes)
      * with zero disk overhead.
      *
+     * Uses a self-scheduling async loop: each callback (sync or async) completes
+     * before the next poll starts. No overlapping polls.
+     *
      * ```ts
      * const unsub = db.messages.select()
      *   .where({ groupId: 1 })
@@ -492,12 +495,12 @@ export class QueryBuilder<T extends Record<string, any>> {
      * unsub();
      * ```
      *
-     * @param callback  Called with the full result set whenever the data changes.
+     * @param callback  Called with the full result set whenever the data changes. Async callbacks are awaited.
      * @param options   `interval` in ms (default 500). Set `immediate` to false to skip the first call.
-     * @returns An unsubscribe function that clears the polling interval.
+     * @returns An unsubscribe function.
      */
     subscribe(
-        callback: (rows: T[]) => void,
+        callback: (rows: T[]) => void | Promise<void>,
         options: { interval?: number; immediate?: boolean } = {},
     ): () => void {
         const { interval = this.defaultPollInterval, immediate = true } = options;
@@ -505,8 +508,10 @@ export class QueryBuilder<T extends Record<string, any>> {
         // Build the fingerprint SQL (COUNT + MAX(id)) using the same WHERE
         const fingerprintSQL = this.buildFingerprintSQL();
         let lastFingerprint: string | null = null;
+        let stopped = false;
 
-        const poll = () => {
+        const poll = async () => {
+            if (stopped) return;
             try {
                 // Run lightweight fingerprint check
                 const fpRows = this.executor(fingerprintSQL.sql, fingerprintSQL.params, true);
@@ -520,24 +525,23 @@ export class QueryBuilder<T extends Record<string, any>> {
                     lastFingerprint = currentFingerprint;
                     // Fingerprint changed → re-execute the full query
                     const rows = this.all();
-                    callback(rows);
+                    await callback(rows);
                 }
             } catch {
                 // Silently skip on error (table might be in transition)
             }
+            // Self-scheduling: next poll only after this one completes
+            if (!stopped) setTimeout(poll, interval);
         };
 
         // Immediate first execution
         if (immediate) {
             poll();
+        } else {
+            setTimeout(poll, interval);
         }
 
-        const timer = setInterval(poll, interval);
-
-        // Return unsubscribe function
-        return () => {
-            clearInterval(timer);
-        };
+        return () => { stopped = true; };
     }
 
     /**
@@ -548,10 +552,19 @@ export class QueryBuilder<T extends Record<string, any>> {
      * `WHERE id > watermark` is rebuilt each poll with the latest value,
      * so it's always O(new_rows) — not O(table_size).
      *
+     * Composes with the query builder chain: any `.where()` conditions
+     * are combined with the watermark clause.
+     *
      * ```ts
+     * // All new messages
      * const unsub = db.messages.select().each((msg) => {
      *     console.log('New:', msg.text);
      * });
+     *
+     * // Only new messages by Alice
+     * const unsub2 = db.messages.select()
+     *     .where({ author: 'Alice' })
+     *     .each((msg) => console.log(msg.text));
      * ```
      *
      * @param callback  Called once per new row. Async callbacks are awaited.
@@ -564,9 +577,14 @@ export class QueryBuilder<T extends Record<string, any>> {
     ): () => void {
         const { interval = this.defaultPollInterval } = options;
 
-        // Initialize watermark to current max id
+        // Compile the user's WHERE clause (if any) so we can combine with watermark
+        const userWhere = this.buildWhereClause();
+
+        // Initialize watermark to current max id, respecting user's WHERE clause
         const maxRows = this.executor(
-            `SELECT MAX(id) as _max FROM ${this.tableName}`, [], true
+            `SELECT MAX(id) as _max FROM ${this.tableName} ${userWhere.sql ? `WHERE ${userWhere.sql}` : ''}`,
+            userWhere.params,
+            true
         );
         let lastMaxId: number = (maxRows[0] as any)?._max ?? 0;
         let lastRevision = this.revisionGetter?.() ?? '0';
@@ -579,16 +597,20 @@ export class QueryBuilder<T extends Record<string, any>> {
             if (rev !== lastRevision) {
                 lastRevision = rev;
 
-                // Fetch only new rows since watermark — O(new_rows)
-                const newRows = this.executor(
-                    `SELECT * FROM ${this.tableName} WHERE id > ? ORDER BY id ASC`,
-                    [lastMaxId], true
-                );
+                // Combine user WHERE with watermark: WHERE (user_conditions) AND id > ?
+                const params = [...userWhere.params, lastMaxId];
+                const whereClause = userWhere.sql
+                    ? `WHERE ${userWhere.sql} AND id > ? ORDER BY id ASC`
+                    : `WHERE id > ? ORDER BY id ASC`;
+                const sql = `SELECT * FROM ${this.tableName} ${whereClause}`;
 
-                for (const rawRow of newRows) {
+                // raw=false → rows go through transform + get .update()/.delete() methods
+                const newRows = this.executor(sql, params, false);
+
+                for (const row of newRows) {
                     if (stopped) return;
-                    await callback(rawRow as unknown as T);
-                    lastMaxId = (rawRow as any).id;
+                    await callback(row as T);
+                    lastMaxId = (row as any).id;
                 }
             }
 
@@ -599,16 +621,16 @@ export class QueryBuilder<T extends Record<string, any>> {
         return () => { stopped = true; };
     }
 
-    /** Build a lightweight fingerprint query (COUNT + MAX(id)) that shares the same WHERE clause. */
-    private buildFingerprintSQL(): { sql: string; params: any[] } {
+    /** Compile the IQO's WHERE conditions into a SQL fragment + params (without the WHERE keyword). */
+    private buildWhereClause(): { sql: string; params: any[] } {
         const params: any[] = [];
-        let sql = `SELECT COUNT(*) as _cnt, MAX(id) as _max FROM ${this.tableName}`;
 
         if (this.iqo.whereAST) {
             const compiled = compileAST(this.iqo.whereAST);
-            sql += ` WHERE ${compiled.sql}`;
-            params.push(...compiled.params);
-        } else if (this.iqo.wheres.length > 0) {
+            return { sql: compiled.sql, params: compiled.params };
+        }
+
+        if (this.iqo.wheres.length > 0) {
             const whereParts: string[] = [];
             for (const w of this.iqo.wheres) {
                 if (w.operator === 'IN') {
@@ -625,10 +647,17 @@ export class QueryBuilder<T extends Record<string, any>> {
                     params.push(transformValueForStorage(w.value));
                 }
             }
-            sql += ` WHERE ${whereParts.join(' AND ')}`;
+            return { sql: whereParts.join(' AND '), params };
         }
 
-        return { sql, params };
+        return { sql: '', params: [] };
+    }
+
+    /** Build a lightweight fingerprint query (COUNT + MAX(id)) that shares the same WHERE clause. */
+    private buildFingerprintSQL(): { sql: string; params: any[] } {
+        const where = this.buildWhereClause();
+        const sql = `SELECT COUNT(*) as _cnt, MAX(id) as _max FROM ${this.tableName}${where.sql ? ` WHERE ${where.sql}` : ''}`;
+        return { sql, params: where.params };
     }
 
     // ---------- Thenable (async/await support) ----------
