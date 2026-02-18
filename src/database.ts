@@ -204,41 +204,54 @@ class _Database<Schemas extends SchemaMap> {
         return () => { stopped = true; };
     }
 
-    /**
-     * Stream specific mutations (update or delete) with natural callback signatures.
-     *
-     * Maintains a full snapshot and diffs on each poll.
-     * Only fires for the subscribed event type.
-     *
-     * - 'update': callback(row, oldRow)
-     * - 'delete': callback(row)
-     */
-    public _createChangeStream(
-        entityName: string,
-        eventType: 'update' | 'delete',
-        callback: (...args: any[]) => void | Promise<void>,
-        intervalOverride?: number,
-    ): () => void {
-        const interval = intervalOverride ?? this.pollInterval;
+    // ===========================================================================
+    // Table Watcher — shared snapshot-diff engine for update/delete events
+    // ===========================================================================
 
-        // Build initial snapshot: Map<id, serialized row>
+    /** One watcher per table — shared by all update/delete listeners. */
+    private _watchers = new Map<string, {
+        updateListeners: Set<(row: any, oldRow: any) => void | Promise<void>>;
+        deleteListeners: Set<(row: any) => void | Promise<void>>;
+        snapshot: Map<number, string>;
+        snapshotEntities: Map<number, any>;
+        lastRevision: string;
+        stopped: boolean;
+    }>();
+
+    /**
+     * Get or create a shared table watcher. One SELECT * per change event,
+     * no matter how many update/delete listeners are registered.
+     */
+    private _getWatcher(entityName: string) {
+        if (this._watchers.has(entityName)) return this._watchers.get(entityName)!;
+
+        // Build initial snapshot
         const allRows = this.db.query(`SELECT * FROM "${entityName}" ORDER BY id ASC`).all() as any[];
-        let snapshot = new Map<number, string>();
-        let snapshotEntities = new Map<number, any>();
+        const snapshot = new Map<number, string>();
+        const snapshotEntities = new Map<number, any>();
         for (const row of allRows) {
             snapshot.set(row.id, JSON.stringify(row));
             snapshotEntities.set(row.id, row);
         }
 
-        let lastRevision: string = this._getRevision(entityName);
-        let stopped = false;
+        const watcher = {
+            updateListeners: new Set<(row: any, oldRow: any) => void | Promise<void>>(),
+            deleteListeners: new Set<(row: any) => void | Promise<void>>(),
+            snapshot,
+            snapshotEntities,
+            lastRevision: this._getRevision(entityName),
+            stopped: false,
+        };
+        this._watchers.set(entityName, watcher);
 
+        // Single poll loop for all listeners on this table
+        const interval = this.pollInterval;
         const poll = async () => {
-            if (stopped) return;
+            if (watcher.stopped) return;
 
             const currentRevision = this._getRevision(entityName);
-            if (currentRevision !== lastRevision) {
-                lastRevision = currentRevision;
+            if (currentRevision !== watcher.lastRevision) {
+                watcher.lastRevision = currentRevision;
 
                 const currentRows = this.db.query(`SELECT * FROM "${entityName}" ORDER BY id ASC`).all() as any[];
                 const currentMap = new Map<number, string>();
@@ -248,46 +261,83 @@ class _Database<Schemas extends SchemaMap> {
                     currentEntities.set(row.id, row);
                 }
 
-                if (eventType === 'update') {
-                    // Detect updates: existing rows whose JSON changed
+                // Dispatch updates
+                if (watcher.updateListeners.size > 0) {
                     for (const [id, json] of currentMap) {
-                        if (stopped) return;
-                        if (snapshot.has(id) && snapshot.get(id) !== json) {
+                        if (watcher.stopped) return;
+                        if (watcher.snapshot.has(id) && watcher.snapshot.get(id) !== json) {
                             const entity = this._attachMethods(
                                 entityName,
                                 transformFromStorage(currentEntities.get(id), this.schemas[entityName]!)
                             );
                             const oldEntity = this._attachMethods(
                                 entityName,
-                                transformFromStorage(snapshotEntities.get(id), this.schemas[entityName]!)
+                                transformFromStorage(watcher.snapshotEntities.get(id), this.schemas[entityName]!)
                             );
-                            await callback(entity, oldEntity);
-                        }
-                    }
-                } else if (eventType === 'delete') {
-                    // Detect deletes: rows in snapshot but not in current
-                    for (const [id] of snapshot) {
-                        if (stopped) return;
-                        if (!currentMap.has(id)) {
-                            const oldEntity = this._attachMethods(
-                                entityName,
-                                transformFromStorage(snapshotEntities.get(id), this.schemas[entityName]!)
-                            );
-                            await callback(oldEntity);
+                            for (const cb of watcher.updateListeners) {
+                                await cb(entity, oldEntity);
+                            }
                         }
                     }
                 }
 
-                snapshot = currentMap;
-                snapshotEntities = currentEntities;
+                // Dispatch deletes
+                if (watcher.deleteListeners.size > 0) {
+                    for (const [id] of watcher.snapshot) {
+                        if (watcher.stopped) return;
+                        if (!currentMap.has(id)) {
+                            const oldEntity = this._attachMethods(
+                                entityName,
+                                transformFromStorage(watcher.snapshotEntities.get(id), this.schemas[entityName]!)
+                            );
+                            for (const cb of watcher.deleteListeners) {
+                                await cb(oldEntity);
+                            }
+                        }
+                    }
+                }
+
+                watcher.snapshot = currentMap;
+                watcher.snapshotEntities = currentEntities;
             }
 
-            if (!stopped) setTimeout(poll, interval);
+            if (!watcher.stopped) setTimeout(poll, interval);
         };
 
         setTimeout(poll, interval);
+        return watcher;
+    }
 
-        return () => { stopped = true; };
+    /**
+     * Register an update or delete listener on the shared table watcher.
+     * Returns an unsubscribe function that auto-stops the watcher when empty.
+     */
+    public _createChangeStream(
+        entityName: string,
+        eventType: 'update' | 'delete',
+        callback: (...args: any[]) => void | Promise<void>,
+        _intervalOverride?: number,  // reserved, uses global pollInterval
+    ): () => void {
+        const watcher = this._getWatcher(entityName);
+
+        if (eventType === 'update') {
+            watcher.updateListeners.add(callback as any);
+        } else {
+            watcher.deleteListeners.add(callback as any);
+        }
+
+        return () => {
+            if (eventType === 'update') {
+                watcher.updateListeners.delete(callback as any);
+            } else {
+                watcher.deleteListeners.delete(callback as any);
+            }
+            // Auto-stop watcher when all listeners removed
+            if (watcher.updateListeners.size === 0 && watcher.deleteListeners.size === 0) {
+                watcher.stopped = true;
+                this._watchers.delete(entityName);
+            }
+        };
     }
 
     // ===========================================================================
