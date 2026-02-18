@@ -167,7 +167,7 @@ export class QueryBuilder<T extends Record<string, any>> {
     private singleExecutor: (sql: string, params: any[], raw: boolean) => any | null;
     private joinResolver: ((fromTable: string, toTable: string) => { fk: string; pk: string } | null) | null;
     private conditionResolver: ((conditions: Record<string, any>) => Record<string, any>) | null;
-    private changeSeqGetter: (() => number) | null;
+    private revisionGetter: (() => number) | null;
 
     constructor(
         tableName: string,
@@ -175,14 +175,14 @@ export class QueryBuilder<T extends Record<string, any>> {
         singleExecutor: (sql: string, params: any[], raw: boolean) => any | null,
         joinResolver?: ((fromTable: string, toTable: string) => { fk: string; pk: string } | null) | null,
         conditionResolver?: ((conditions: Record<string, any>) => Record<string, any>) | null,
-        changeSeqGetter?: (() => number) | null,
+        revisionGetter?: (() => number) | null,
     ) {
         this.tableName = tableName;
         this.executor = executor;
         this.singleExecutor = singleExecutor;
         this.joinResolver = joinResolver ?? null;
         this.conditionResolver = conditionResolver ?? null;
-        this.changeSeqGetter = changeSeqGetter ?? null;
+        this.revisionGetter = revisionGetter ?? null;
         this.iqo = {
             selects: [],
             wheres: [],
@@ -423,9 +423,9 @@ export class QueryBuilder<T extends Record<string, any>> {
     /**
      * Subscribe to query result changes using smart interval-based polling.
      *
-     * Instead of re-fetching all rows every tick, it runs a lightweight
-     * fingerprint query (`SELECT COUNT(*), MAX(id)`) with the same WHERE clause.
-     * The full query is only re-executed when the fingerprint changes.
+     * Uses a lightweight fingerprint (`COUNT(*), MAX(id)`) combined with an
+     * in-memory revision counter to detect ALL changes (inserts, updates, deletes)
+     * with zero disk overhead.
      *
      * ```ts
      * const unsub = db.messages.select()
@@ -459,10 +459,10 @@ export class QueryBuilder<T extends Record<string, any>> {
                 // Run lightweight fingerprint check
                 const fpRows = this.executor(fingerprintSQL.sql, fingerprintSQL.params, true);
                 const fpRow = fpRows[0] as any;
-                // Include change sequence in fingerprint when change tracking is enabled.
-                // This ensures UPDATEs are detected (COUNT + MAX alone don't change on UPDATE).
-                const changeSeq = this.changeSeqGetter?.() ?? 0;
-                const currentFingerprint = `${fpRow?._cnt ?? 0}:${fpRow?._max ?? 0}:${changeSeq}`;
+                // Include in-memory revision in fingerprint.
+                // This ensures ALL changes (insert/update/delete) are detected.
+                const rev = this.revisionGetter?.() ?? 0;
+                const currentFingerprint = `${fpRow?._cnt ?? 0}:${fpRow?._max ?? 0}:${rev}`;
 
                 if (currentFingerprint !== lastFingerprint) {
                     lastFingerprint = currentFingerprint;

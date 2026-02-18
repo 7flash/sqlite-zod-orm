@@ -5,7 +5,6 @@
  * query builders, and event handling.
  */
 import { Database as SqliteDatabase } from 'bun:sqlite';
-import { EventEmitter } from 'events';
 import { z } from 'zod';
 import { QueryBuilder } from './query-builder';
 import { executeProxyQuery, type ProxyQueryResult } from './proxy-query';
@@ -25,25 +24,25 @@ import {
 // Database Class
 // =============================================================================
 
-class _Database<Schemas extends SchemaMap> extends EventEmitter {
+class _Database<Schemas extends SchemaMap> {
     private db: SqliteDatabase;
     private schemas: Schemas;
     private relationships: Relationship[];
-    private subscriptions: Record<'insert' | 'update' | 'delete', Record<string, ((data: any) => void)[]>>;
     private options: DatabaseOptions;
 
+    /** In-memory revision counter per table — bumps on every write (insert/update/delete).
+     *  Used by QueryBuilder.subscribe() fingerprint to detect ALL changes with zero overhead. */
+    private _revisions: Record<string, number> = {};
+
     constructor(dbFile: string, schemas: Schemas, options: DatabaseOptions = {}) {
-        super();
         this.db = new SqliteDatabase(dbFile);
         this.db.run('PRAGMA foreign_keys = ON');
         this.schemas = schemas;
         this.options = options;
-        this.subscriptions = { insert: {}, update: {}, delete: {} };
         this.relationships = options.relations ? parseRelationsConfig(options.relations, schemas) : [];
         this.initializeTables();
         this.runMigrations();
         if (options.indexes) this.createIndexes(options.indexes);
-        if (options.changeTracking) this.setupChangeTracking();
 
         // Create typed entity accessors (db.users, db.posts, etc.)
         for (const entityName of Object.keys(schemas)) {
@@ -56,8 +55,6 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
                 },
                 upsert: (conditions, data) => this.upsert(entityName, data, conditions),
                 delete: (id) => this.delete(entityName, id),
-                subscribe: (event, callback) => this.subscribe(event, entityName, callback),
-                unsubscribe: (event, callback) => this.unsubscribe(event, entityName, callback),
                 select: (...cols: string[]) => this._createQueryBuilder(entityName, cols),
                 _tableName: entityName,
             };
@@ -90,85 +87,42 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
     }
 
     private runMigrations(): void {
-        this.db.run(`CREATE TABLE IF NOT EXISTS _schema_meta (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      table_name TEXT NOT NULL,
-      column_name TEXT NOT NULL,
-      added_at TEXT DEFAULT (datetime('now')),
-      UNIQUE(table_name, column_name)
-    )`);
-
         for (const [entityName, schema] of Object.entries(this.schemas)) {
-            const existingCols = new Set(
-                (this.db.query(`PRAGMA table_info(${entityName})`).all() as any[]).map(c => c.name)
-            );
-            const storableFields = getStorableFields(schema);
+            const existingColumns = this.db.query(`PRAGMA table_info(${entityName})`).all() as any[];
+            const existingNames = new Set(existingColumns.map(c => c.name));
 
+            const storableFields = getStorableFields(schema);
             for (const field of storableFields) {
-                if (!existingCols.has(field.name)) {
-                    this.db.run(`ALTER TABLE ${entityName} ADD COLUMN ${field.name} ${zodTypeToSqlType(field.type)}`);
-                    this.db.query(`INSERT OR IGNORE INTO _schema_meta (table_name, column_name) VALUES (?, ?)`).run(entityName, field.name);
+                if (!existingNames.has(field.name)) {
+                    const sqlType = zodTypeToSqlType(field.type);
+                    this.db.run(`ALTER TABLE ${entityName} ADD COLUMN ${field.name} ${sqlType}`);
                 }
             }
         }
     }
 
-    // ===========================================================================
-    // Indexes
-    // ===========================================================================
-
-    private createIndexes(indexDefs: Record<string, string | (string | string[])[]>): void {
-        for (const [tableName, indexes] of Object.entries(indexDefs)) {
-            if (!this.schemas[tableName]) throw new Error(`Cannot create index on unknown table '${tableName}'`);
-            const indexList = Array.isArray(indexes) ? indexes : [indexes];
-            for (const indexDef of indexList) {
-                const columns = Array.isArray(indexDef) ? indexDef : [indexDef];
-                const indexName = `idx_${tableName}_${columns.join('_')}`;
-                this.db.run(`CREATE INDEX IF NOT EXISTS ${indexName} ON ${tableName} (${columns.join(', ')})`);
+    private createIndexes(indexes: Record<string, (string | string[])[]>): void {
+        for (const [tableName, indexDefs] of Object.entries(indexes)) {
+            for (const def of indexDefs) {
+                const cols = Array.isArray(def) ? def : [def];
+                const idxName = `idx_${tableName}_${cols.join('_')}`;
+                this.db.run(`CREATE INDEX IF NOT EXISTS ${idxName} ON ${tableName} (${cols.join(', ')})`);
             }
         }
     }
 
     // ===========================================================================
-    // Change Tracking
+    // Revision Tracking (in-memory, zero overhead)
     // ===========================================================================
 
-    private setupChangeTracking(): void {
-        this.db.run(`CREATE TABLE IF NOT EXISTS _changes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      table_name TEXT NOT NULL,
-      row_id INTEGER NOT NULL,
-      action TEXT NOT NULL CHECK(action IN ('INSERT', 'UPDATE', 'DELETE')),
-      changed_at TEXT DEFAULT (datetime('now'))
-    )`);
-        this.db.run(`CREATE INDEX IF NOT EXISTS idx_changes_table ON _changes (table_name, id)`);
-
-        for (const entityName of Object.keys(this.schemas)) {
-            for (const action of ['insert', 'update', 'delete'] as const) {
-                const ref = action === 'delete' ? 'OLD' : 'NEW';
-                this.db.run(`CREATE TRIGGER IF NOT EXISTS _trg_${entityName}_${action}
-          AFTER ${action.toUpperCase()} ON ${entityName}
-          BEGIN
-            INSERT INTO _changes (table_name, row_id, action) VALUES ('${entityName}', ${ref}.id, '${action.toUpperCase()}');
-          END`);
-            }
-        }
+    /** Bump the revision counter for a table. Called on every write. */
+    private _bumpRevision(entityName: string): void {
+        this._revisions[entityName] = (this._revisions[entityName] ?? 0) + 1;
     }
 
-    public getChangeSeq(tableName?: string): number {
-        if (!this.options.changeTracking) return -1;
-        const sql = tableName
-            ? `SELECT MAX(id) as seq FROM _changes WHERE table_name = ?`
-            : `SELECT MAX(id) as seq FROM _changes`;
-        const row = this.db.query(sql).get(...(tableName ? [tableName] : [])) as any;
-        return row?.seq ?? 0;
-    }
-
-    public getChangesSince(sinceSeq: number, tableName?: string) {
-        const sql = tableName
-            ? `SELECT * FROM _changes WHERE id > ? AND table_name = ? ORDER BY id ASC`
-            : `SELECT * FROM _changes WHERE id > ? ORDER BY id ASC`;
-        return this.db.query(sql).all(...(tableName ? [sinceSeq, tableName] : [sinceSeq])) as any[];
+    /** Get the current revision for a table. Used by QueryBuilder.subscribe() fingerprint. */
+    public _getRevision(entityName: string): number {
+        return this._revisions[entityName] ?? 0;
     }
 
     // ===========================================================================
@@ -189,8 +143,7 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
         const newEntity = this._getById(entityName, result.lastInsertRowid as number);
         if (!newEntity) throw new Error('Failed to retrieve entity after insertion');
 
-        this.emit('insert', entityName, newEntity);
-        this.subscriptions.insert[entityName]?.forEach(cb => cb(newEntity));
+        this._bumpRevision(entityName);
         return newEntity;
     }
 
@@ -227,11 +180,8 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
         const setClause = Object.keys(transformed).map(key => `${key} = ?`).join(', ');
         this.db.query(`UPDATE ${entityName} SET ${setClause} WHERE id = ?`).run(...Object.values(transformed), id);
 
+        this._bumpRevision(entityName);
         const updatedEntity = this._getById(entityName, id);
-        if (updatedEntity) {
-            this.emit('update', entityName, updatedEntity);
-            this.subscriptions.update[entityName]?.forEach(cb => cb(updatedEntity));
-        }
         return updatedEntity;
     }
 
@@ -252,12 +202,7 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
         );
 
         const affected = (result as any).changes ?? 0;
-        if (affected > 0 && (this.subscriptions.update[entityName]?.length || this.options.changeTracking)) {
-            for (const entity of this._findMany(entityName, conditions)) {
-                this.emit('update', entityName, entity);
-                this.subscriptions.update[entityName]?.forEach(cb => cb(entity));
-            }
-        }
+        if (affected > 0) this._bumpRevision(entityName);
         return affected;
     }
 
@@ -292,8 +237,7 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
         const entity = this._getById(entityName, id);
         if (entity) {
             this.db.query(`DELETE FROM ${entityName} WHERE id = ?`).run(id);
-            this.emit('delete', entityName, entity);
-            this.subscriptions.delete[entityName]?.forEach(cb => cb(entity));
+            this._bumpRevision(entityName);
         }
     }
 
@@ -416,21 +360,6 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
     }
 
     // ===========================================================================
-    // Events
-    // ===========================================================================
-
-    private subscribe(event: 'insert' | 'update' | 'delete', entityName: string, callback: (data: any) => void): void {
-        this.subscriptions[event][entityName] = this.subscriptions[event][entityName] || [];
-        this.subscriptions[event][entityName].push(callback);
-    }
-
-    private unsubscribe(event: 'insert' | 'update' | 'delete', entityName: string, callback: (data: any) => void): void {
-        if (this.subscriptions[event][entityName]) {
-            this.subscriptions[event][entityName] = this.subscriptions[event][entityName].filter(cb => cb !== callback);
-        }
-    }
-
-    // ===========================================================================
     // Query Builders
     // ===========================================================================
 
@@ -459,13 +388,11 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
             if (reverse) return { fk: 'id', pk: reverse.foreignKey };
             return null;
         };
-        // Provide change sequence getter when change tracking is enabled
-        // This allows .subscribe() to detect row UPDATEs (not just inserts/deletes)
-        const changeSeqGetter = this.options.changeTracking
-            ? () => this.getChangeSeq(entityName)
-            : null;
 
-        const builder = new QueryBuilder(entityName, executor, singleExecutor, joinResolver, null, changeSeqGetter);
+        // Pass revision getter — allows .subscribe() to detect ALL changes
+        const revisionGetter = () => this._getRevision(entityName);
+
+        const builder = new QueryBuilder(entityName, executor, singleExecutor, joinResolver, null, revisionGetter);
         if (initialCols.length > 0) builder.select(...initialCols);
         return builder;
     }

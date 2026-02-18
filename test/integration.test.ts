@@ -375,13 +375,31 @@ describe('Schema validation', () => {
 // 11. SUBSCRIBE
 // =============================================================================
 
-describe('Subscribe', () => {
-    test('insert event fires callback', () => {
-        let captured: any = null;
-        db.forests.subscribe('insert', (data) => { captured = data; });
-        db.forests.insert({ name: 'SubscribeTest', address: 'Test' });
-        expect(captured).not.toBeNull();
-        expect(captured.name).toBe('SubscribeTest');
+describe('Subscribe (smart polling)', () => {
+    test('select().subscribe() detects inserts', async () => {
+        let callCount = 0;
+        let lastRows: any[] = [];
+        const unsub = db.forests.select()
+            .where({ name: 'PollTest' })
+            .subscribe((rows) => {
+                callCount++;
+                lastRows = rows;
+            }, { interval: 30 });
+
+        // Immediate first call (no data yet)
+        expect(callCount).toBe(1);
+        expect(lastRows.length).toBe(0);
+
+        // Insert a matching row
+        db.forests.insert({ name: 'PollTest', address: 'Here' });
+        await new Promise(r => setTimeout(r, 100));
+
+        // Should have fired again with new data
+        expect(callCount).toBeGreaterThan(1);
+        expect(lastRows.length).toBe(1);
+        expect(lastRows[0].name).toBe('PollTest');
+
+        unsub();
     });
 });
 

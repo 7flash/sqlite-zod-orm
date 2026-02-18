@@ -21,7 +21,6 @@ export type IndexDef = string | string[];
 
 /** Options for the Database constructor */
 export type DatabaseOptions<R extends RelationsConfig = RelationsConfig> = {
-    changeTracking?: boolean;
     indexes?: Record<string, IndexDef[]>;
     /**
      * Declare relationships between tables.
@@ -143,8 +142,6 @@ export type NavEntityAccessor<
     & ((data: Partial<Omit<z.input<S[Table & keyof S]>, 'id'>>) => UpdateBuilder<NavEntity<S, R, Table>>);
     upsert: (conditions?: Partial<z.infer<S[Table & keyof S]>>, data?: Partial<z.infer<S[Table & keyof S]>>) => NavEntity<S, R, Table>;
     delete: (id: number) => void;
-    subscribe: (event: 'insert' | 'update' | 'delete', callback: (data: NavEntity<S, R, Table>) => void) => void;
-    unsubscribe: (event: 'insert' | 'update' | 'delete', callback: (data: NavEntity<S, R, Table>) => void) => void;
     select: (...cols: (keyof z.infer<S[Table & keyof S]> & string)[]) => QueryBuilder<NavEntity<S, R, Table>>;
     _tableName: string;
     readonly _schema?: S[Table & keyof S];
@@ -170,8 +167,6 @@ export type EntityAccessor<S extends z.ZodType<any>> = {
     update: ((id: number, data: Partial<EntityData<S>>) => AugmentedEntity<S> | null) & ((data: Partial<EntityData<S>>) => UpdateBuilder<AugmentedEntity<S>>);
     upsert: (conditions?: Partial<InferSchema<S>>, data?: Partial<InferSchema<S>>) => AugmentedEntity<S>;
     delete: (id: number) => void;
-    subscribe: (event: 'insert' | 'update' | 'delete', callback: (data: AugmentedEntity<S>) => void) => void;
-    unsubscribe: (event: 'insert' | 'update' | 'delete', callback: (data: AugmentedEntity<S>) => void) => void;
     select: (...cols: (keyof InferSchema<S> & string)[]) => QueryBuilder<AugmentedEntity<S>>;
     _tableName: string;
     readonly _schema?: S;
