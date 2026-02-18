@@ -321,7 +321,7 @@ Run `bun examples/messages-demo.ts` for a full working demo.
 ```bash
 bun examples/messages-demo.ts  # .on() vs .subscribe() demo
 bun examples/example.ts        # comprehensive demo
-bun test                        # 93 tests
+bun test                        # 100 tests
 ```
 
 ---
@@ -336,6 +336,8 @@ bun test                        # 93 tests
 | `db.table.select(...cols?).where(filter).all()` | Array of rows |
 | `db.table.select().count()` | Count rows |
 | `db.table.select().join(db.other, cols?).all()` | Fluent join (auto FK) |
+| `db.table.select().with('children').all()` | Eager load related entities (no N+1) |
+| `.where({ relation: entity })` | Filter by entity reference |
 | `db.query(c => { ... })` | Proxy callback (SQL-like JOINs) |
 | **Writing** | |
 | `db.table.insert(data)` | Insert with validation |

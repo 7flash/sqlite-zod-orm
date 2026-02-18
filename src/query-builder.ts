@@ -173,6 +173,7 @@ export class QueryBuilder<T extends Record<string, any>> {
     private joinResolver: ((fromTable: string, toTable: string) => { fk: string; pk: string } | null) | null;
     private conditionResolver: ((conditions: Record<string, any>) => Record<string, any>) | null;
     private revisionGetter: (() => string) | null;
+    private eagerLoader: ((parentTable: string, relation: string, parentIds: number[]) => { key: string; groups: Map<number, any[]> } | null) | null;
 
     constructor(
         tableName: string,
@@ -181,6 +182,7 @@ export class QueryBuilder<T extends Record<string, any>> {
         joinResolver?: ((fromTable: string, toTable: string) => { fk: string; pk: string } | null) | null,
         conditionResolver?: ((conditions: Record<string, any>) => Record<string, any>) | null,
         revisionGetter?: (() => string) | null,
+        eagerLoader?: ((parentTable: string, relation: string, parentIds: number[]) => { key: string; groups: Map<number, any[]> } | null) | null,
     ) {
         this.tableName = tableName;
         this.executor = executor;
@@ -188,6 +190,7 @@ export class QueryBuilder<T extends Record<string, any>> {
         this.joinResolver = joinResolver ?? null;
         this.conditionResolver = conditionResolver ?? null;
         this.revisionGetter = revisionGetter ?? null;
+        this.eagerLoader = eagerLoader ?? null;
         this.iqo = {
             selects: [],
             wheres: [],
@@ -374,19 +377,60 @@ export class QueryBuilder<T extends Record<string, any>> {
         return this;
     }
 
+    /**
+     * Eagerly load a related entity and attach as an array property.
+     *
+     * ```ts
+     * const authors = db.authors.select().with('books').all();
+     * // authors[0].books → [{ title: 'War and Peace', ... }, ...]
+     * ```
+     *
+     * Runs a single batched query (WHERE fk IN (...)) per relation,
+     * avoiding the N+1 problem of lazy navigation.
+     */
+    with(...relations: string[]): this {
+        this.iqo.includes.push(...relations);
+        return this;
+    }
+
+    /** Internal: apply eager loads to a set of results */
+    private _applyEagerLoads(results: T[]): T[] {
+        if (this.iqo.includes.length === 0 || !this.eagerLoader || results.length === 0) {
+            return results;
+        }
+
+        const parentIds = results.map((r: any) => r.id).filter((id: any) => typeof id === 'number');
+        if (parentIds.length === 0) return results;
+
+        for (const relation of this.iqo.includes) {
+            const loaded = this.eagerLoader(this.tableName, relation, parentIds);
+            if (!loaded) continue;
+
+            for (const row of results as any[]) {
+                row[loaded.key] = loaded.groups.get(row.id) ?? [];
+            }
+        }
+
+        return results;
+    }
+
     // ---------- Terminal / Execution Methods ----------
 
     /** Execute the query and return all matching rows. */
     all(): T[] {
         const { sql, params } = compileIQO(this.tableName, this.iqo);
-        return this.executor(sql, params, this.iqo.raw);
+        const results = this.executor(sql, params, this.iqo.raw);
+        return this._applyEagerLoads(results);
     }
 
     /** Execute the query and return the first matching row, or null. */
     get(): T | null {
         this.iqo.limit = 1;
         const { sql, params } = compileIQO(this.tableName, this.iqo);
-        return this.singleExecutor(sql, params, this.iqo.raw);
+        const result = this.singleExecutor(sql, params, this.iqo.raw);
+        if (!result) return null;
+        const [loaded] = this._applyEagerLoads([result]);
+        return loaded ?? null;
     }
 
     /** Execute the query and return the count of matching rows. */

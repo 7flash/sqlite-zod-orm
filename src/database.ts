@@ -486,7 +486,55 @@ class _Database<Schemas extends SchemaMap> {
             return resolved;
         };
 
-        const builder = new QueryBuilder(entityName, executor, singleExecutor, joinResolver, conditionResolver, revisionGetter);
+        // Eager loader: resolves .with('books') → batch load children
+        const eagerLoader = (parentTable: string, relation: string, parentIds: number[]): { key: string; groups: Map<number, any[]> } | null => {
+            // 1. Try one-to-many: parentTable has-many relation (e.g., authors → books)
+            const hasMany = this.relationships.find(
+                r => r.type === 'one-to-many' && r.from === parentTable && r.relationshipField === relation
+            );
+            if (hasMany) {
+                // Find the belongs-to FK on the child table
+                const belongsTo = this.relationships.find(
+                    r => r.type === 'belongs-to' && r.from === hasMany.to && r.to === parentTable
+                );
+                if (belongsTo) {
+                    const fk = belongsTo.foreignKey;
+                    const placeholders = parentIds.map(() => '?').join(', ');
+                    const childRows = this.db.query(
+                        `SELECT * FROM ${hasMany.to} WHERE ${fk} IN (${placeholders})`
+                    ).all(...parentIds) as any[];
+
+                    const groups = new Map<number, any[]>();
+                    const childSchema = this.schemas[hasMany.to]!;
+                    for (const rawRow of childRows) {
+                        const entity = this._attachMethods(
+                            hasMany.to,
+                            transformFromStorage(rawRow, childSchema)
+                        );
+                        const parentId = rawRow[fk] as number;
+                        if (!groups.has(parentId)) groups.set(parentId, []);
+                        groups.get(parentId)!.push(entity);
+                    }
+                    return { key: relation, groups };
+                }
+            }
+
+            // 2. Try belongs-to: parentTable belongs-to relation (e.g., books → author)
+            const belongsTo = this.relationships.find(
+                r => r.type === 'belongs-to' && r.from === parentTable && r.relationshipField === relation
+            );
+            if (belongsTo) {
+                // Load parent entities and map by id
+                const fkValues = [...new Set(parentIds)];
+                // Actually we need FK values from parent rows, not parent IDs
+                // This case is trickier — skip for now, belongs-to is already handled by lazy nav
+                return null;
+            }
+
+            return null;
+        };
+
+        const builder = new QueryBuilder(entityName, executor, singleExecutor, joinResolver, conditionResolver, revisionGetter, eagerLoader);
         if (initialCols.length > 0) builder.select(...initialCols);
         return builder;
     }

@@ -566,4 +566,38 @@ describe('Config-based relations — authors/books', () => {
         expect((rows[0] as any).title).toBe('The Trial');
         expect((rows[0] as any).authors_country).toBe('Czech Republic');
     });
+
+    test('.with() eager loading — single author', () => {
+        const tolstoyWithBooks = cdb.authors.select().where({ name: 'Leo Tolstoy' }).with('books').get()! as any;
+        expect(tolstoyWithBooks.name).toBe('Leo Tolstoy');
+        expect(tolstoyWithBooks.books).toBeDefined();
+        expect(tolstoyWithBooks.books.length).toBe(2);
+        expect(tolstoyWithBooks.books.map((b: any) => b.title).sort()).toEqual(['Anna Karenina', 'War and Peace']);
+    });
+
+    test('.with() eager loading — all authors', () => {
+        const authors = cdb.authors.select().with('books').all() as any[];
+        expect(authors.length).toBe(2);
+
+        const t = authors.find((a: any) => a.name === 'Leo Tolstoy')!;
+        const k = authors.find((a: any) => a.name === 'Franz Kafka')!;
+        expect(t.books.length).toBe(2);
+        expect(k.books.length).toBe(1);
+        expect(k.books[0].title).toBe('The Trial');
+    });
+
+    test('.with() eager loading — children are augmented entities', () => {
+        const author = cdb.authors.select().where({ name: 'Franz Kafka' }).with('books').get()! as any;
+        const book = author.books[0];
+        expect(typeof book.update).toBe('function');
+        expect(typeof book.delete).toBe('function');
+    });
+
+    test('.with() — entity with no children gets empty array', () => {
+        const newAuthor = cdb.authors.insert({ name: 'Unknown Author', country: 'N/A' });
+        const loaded = cdb.authors.select().where({ id: newAuthor.id }).with('books').get()! as any;
+        expect(loaded.books).toBeDefined();
+        expect(loaded.books.length).toBe(0);
+        newAuthor.delete(); // cleanup
+    });
 });

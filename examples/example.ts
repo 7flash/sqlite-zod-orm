@@ -181,7 +181,27 @@ const longBooks = db.books.select('title', 'pages')
 console.log('Long books:', longBooks.map((b: any) => `${b.title} (${b.pages}p) by ${b.authors_name}`));
 
 // =============================================================================
-// 8. PROXY CALLBACK — db.query() for SQL-like JOINs
+// 8. EAGER LOADING — .with() to avoid N+1
+// =============================================================================
+
+console.log('\n── 6. Eager Loading (.with) ──');
+
+// Authors with their books embedded as arrays — single IN query, no N+1
+const authorsWithBooks = db.authors.select().with('books').all();
+for (const author of authorsWithBooks) {
+    const books = (author as any).books.map((b: any) => b.title);
+    console.log(`  ${author.name}: [${books.join(', ')}]`);
+}
+
+// Combine with .where() + entity reference
+const tolstoyBooksByRef = db.books.select('title', 'year')
+    .where({ author: tolstoy } as any)
+    .orderBy('year', 'asc')
+    .all();
+console.log(`Tolstoy's books (entity ref):`, tolstoyBooksByRef.map((b: any) => `${b.title} (${b.year})`));
+
+// =============================================================================
+// 9. PROXY CALLBACK — db.query() for SQL-like JOINs
 // =============================================================================
 
 console.log('\n── 6. Proxy Callback (SQL-like) ──');
