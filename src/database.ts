@@ -459,8 +459,13 @@ class _Database<Schemas extends SchemaMap> extends EventEmitter {
             if (reverse) return { fk: 'id', pk: reverse.foreignKey };
             return null;
         };
+        // Provide change sequence getter when change tracking is enabled
+        // This allows .subscribe() to detect row UPDATEs (not just inserts/deletes)
+        const changeSeqGetter = this.options.changeTracking
+            ? () => this.getChangeSeq(entityName)
+            : null;
 
-        const builder = new QueryBuilder(entityName, executor, singleExecutor, joinResolver);
+        const builder = new QueryBuilder(entityName, executor, singleExecutor, joinResolver, null, changeSeqGetter);
         if (initialCols.length > 0) builder.select(...initialCols);
         return builder;
     }

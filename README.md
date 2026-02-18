@@ -207,28 +207,189 @@ const db = new Database(':memory:', schemas, {
 
 ---
 
-## Change Tracking & Events
+## Reactivity — Three Ways to React to Changes
+
+sqlite-zod-orm provides three reactivity mechanisms for different use cases:
+
+| System | Detects | Scope | Overhead | Best for |
+|---|---|---|---|---|
+| **CRUD Events** | insert, update, delete | In-process, per table | Zero (synchronous) | Side effects, caching, logs |
+| **Smart Polling** | insert, delete, update* | Any query result | Lightweight fingerprint check | Live UI, dashboards |
+| **Change Tracking** | insert, update, delete | Per table or global | Trigger-based WAL | Cross-process sync, audit |
+
+\* Smart polling detects UPDATEs automatically when `changeTracking` is enabled. Without it, only inserts and deletes are detected.
+
+---
+
+### 1. CRUD Events — `db.table.subscribe(event, callback)`
+
+Synchronous callbacks fired immediately after each CRUD operation. Zero overhead; the callback runs inline.
 
 ```typescript
-const db = new Database(':memory:', schemas, { changeTracking: true });
-db.getChangesSince(0);
+// Listen for new users
+db.users.subscribe('insert', (user) => {
+  console.log('New user:', user.name);   // fires on every db.users.insert(...)
+});
 
-db.users.subscribe('insert', (user) => console.log('New:', user.name));
+// Listen for updates
+db.users.subscribe('update', (user) => {
+  console.log('Updated:', user.name, '→', user.role);
+});
+
+// Listen for deletes
+db.users.subscribe('delete', (user) => {
+  console.log('Deleted:', user.name);
+});
+
+// Stop listening
+db.users.unsubscribe('update', myCallback);
+```
+
+**Use cases:**
+- Invalidating a cache after writes
+- Logging / audit trail
+- Sending notifications
+- Keeping derived data in sync (e.g., a counter table)
+
+The database also extends Node's `EventEmitter`, so you can use `db.on()`:
+
+```typescript
+db.on('insert', (tableName, entity) => {
+  console.log(`New row in ${tableName}:`, entity.id);
+});
 ```
 
 ---
 
-## Smart Polling
+### 2. Smart Polling — `select().subscribe(callback, options)`
+
+Query-level polling that watches *any query result* for changes. Instead of re-fetching all rows every tick, it runs a **lightweight fingerprint query** (`SELECT COUNT(*), MAX(id)`) with the same WHERE clause. The full query only re-executes when the fingerprint changes.
 
 ```typescript
+// Watch for admin list changes, poll every second
 const unsub = db.users.select()
   .where({ role: 'admin' })
+  .orderBy('name', 'asc')
   .subscribe((admins) => {
-    console.log('Admin list changed:', admins);
+    console.log('Admin list:', admins.map(a => a.name));
   }, { interval: 1000 });
 
+// Stop watching
 unsub();
 ```
+
+**Options:**
+
+| Option | Default | Description |
+|---|---|---|
+| `interval` | `500` | Polling interval in milliseconds |
+| `immediate` | `true` | Whether to fire the callback immediately with the current result |
+
+**How the fingerprint works:**
+
+```
+┌─────────────────────────────────────┐
+│  Every {interval}ms:                │
+│                                     │
+│  1. Run: SELECT COUNT(*), MAX(id)   │
+│     FROM users WHERE role = 'admin' │
+│                                     │  ← fast, no data transfer
+│  2. Compare fingerprint to last     │
+│                                     │
+│  3. If changed → re-run full query  │  ← only when needed
+│     and call your callback          │
+└─────────────────────────────────────┘
+```
+
+**What it detects:**
+
+| Operation | Without `changeTracking` | With `changeTracking` |
+|---|---|---|
+| INSERT | ✅ (MAX(id) increases) | ✅ |
+| DELETE | ✅ (COUNT changes) | ✅ |
+| UPDATE | ❌ (fingerprint unchanged) | ✅ (change sequence bumps) |
+
+> **Tip:** Enable `changeTracking: true` if you need `.subscribe()` to react to UPDATEs.
+> The overhead is minimal — one trigger per table that appends to a `_changes` log.
+
+**Use cases:**
+- Live dashboards (poll every 1-5s)
+- Real-time chat message lists
+- Auto-refreshing data tables
+- Watching filtered subsets of data
+
+---
+
+### 3. Change Tracking — `changeTracking: true`
+
+A trigger-based WAL (write-ahead log) that records every INSERT, UPDATE, and DELETE to a `_changes` table. This is the foundation for cross-process sync and audit trails.
+
+```typescript
+const db = new Database(':memory:', schemas, {
+  changeTracking: true,
+});
+```
+
+When enabled, the ORM creates:
+- A `_changes` table: `(id, table_name, row_id, action, changed_at)`
+- An index on `(table_name, id)` for fast lookups
+- Triggers on each table for INSERT, UPDATE, and DELETE
+
+**Reading changes:**
+
+```typescript
+// Get the current sequence number (latest change ID)
+const seq = db.getChangeSeq();            // global
+const seq = db.getChangeSeq('users');     // per table
+
+// Get all changes since a sequence number
+const changes = db.getChangesSince(0);    // all changes ever
+const changes = db.getChangesSince(seq);  // new changes since seq
+
+// Each change looks like:
+// { id: 42, table_name: 'users', row_id: 7, action: 'UPDATE', changed_at: '2024-...' }
+```
+
+**Polling for changes (external sync pattern):**
+
+```typescript
+let lastSeq = 0;
+
+setInterval(() => {
+  const changes = db.getChangesSince(lastSeq);
+  if (changes.length > 0) {
+    lastSeq = changes[changes.length - 1].id;
+    for (const change of changes) {
+      console.log(`${change.action} on ${change.table_name} row ${change.row_id}`);
+    }
+  }
+}, 1000);
+```
+
+**Use cases:**
+- Syncing between processes (e.g., worker → main thread)
+- Building an event-sourced system
+- Replication to another database
+- Audit logging with timestamps
+- Powering smart polling UPDATE detection
+
+---
+
+### Choosing the Right System
+
+```
+Do you need to react to your own writes?
+  → CRUD Events (db.table.subscribe)
+
+Do you need to watch a query result set?
+  → Smart Polling (select().subscribe)
+  → Enable changeTracking if you need UPDATE detection
+
+Do you need cross-process sync or audit?
+  → Change Tracking (changeTracking: true + getChangesSince)
+```
+
+All three systems can be used together. `changeTracking` enhances smart polling automatically — no code changes needed.
 
 ---
 
@@ -262,10 +423,13 @@ bun test                    # 91 tests
 | `entity.navMethod()` | Lazy navigation (FK name minus `_id`) |
 | `entity.update(data)` | Update entity in-place |
 | `entity.delete()` | Delete entity |
-| **Events** | |
-| `db.table.subscribe(event, callback)` | Listen for insert/update/delete |
-| `db.table.select().subscribe(cb, opts)` | Smart polling |
-| `db.getChangesSince(version, table?)` | Change tracking |
+| **Reactivity** | |
+| `db.table.subscribe(event, cb)` | CRUD events: `'insert'`, `'update'`, `'delete'` |
+| `db.table.unsubscribe(event, cb)` | Remove CRUD event listener |
+| `db.on(event, cb)` | EventEmitter: listen across all tables |
+| `select().subscribe(cb, opts?)` | Smart polling (fingerprint-based) |
+| `db.getChangeSeq(table?)` | Current change sequence number |
+| `db.getChangesSince(seq, table?)` | Changes since sequence (change tracking) |
 
 ## License
 
