@@ -146,9 +146,10 @@ export type NavEntityAccessor<
     /**
      * Stream new rows one at a time, in insertion order.
      * Only emits rows inserted AFTER subscription starts.
+     * Callbacks are awaited — strict ordering guaranteed even with async handlers.
      * @returns Unsubscribe function.
      */
-    on: (callback: (row: NavEntity<S, R, Table>) => void, options?: { interval?: number }) => () => void;
+    on: (callback: (row: NavEntity<S, R, Table>) => void | Promise<void>, options?: { interval?: number }) => () => void;
     _tableName: string;
     readonly _schema?: S[Table & keyof S];
 };
@@ -177,9 +178,10 @@ export type EntityAccessor<S extends z.ZodType<any>> = {
     /**
      * Stream new rows one at a time, in insertion order.
      * Only emits rows inserted AFTER subscription starts.
+     * Callbacks are awaited — strict ordering guaranteed even with async handlers.
      * @returns Unsubscribe function.
      */
-    on: (callback: (row: AugmentedEntity<S>) => void, options?: { interval?: number }) => () => void;
+    on: (callback: (row: AugmentedEntity<S>) => void | Promise<void>, options?: { interval?: number }) => () => void;
     _tableName: string;
     readonly _schema?: S;
 };

@@ -151,7 +151,7 @@ class _Database<Schemas extends SchemaMap> {
      */
     public _createOnStream(
         entityName: string,
-        callback: (row: any) => void,
+        callback: (row: any) => void | Promise<void>,
         options?: { interval?: number },
     ): () => void {
         const { interval = 500 } = options ?? {};
@@ -160,30 +160,43 @@ class _Database<Schemas extends SchemaMap> {
         const maxRow = this.db.query(`SELECT MAX(id) as _max FROM "${entityName}"`).get() as any;
         let lastMaxId: number = maxRow?._max ?? 0;
         let lastRevision: string = this._getRevision(entityName);
+        let stopped = false;
 
-        const timer = setInterval(() => {
+        // Self-scheduling async loop: guarantees strict ordering
+        // - Each callback (sync or async) completes before the next row is emitted
+        // - Next poll only starts after the current batch is fully processed
+        const poll = async () => {
+            if (stopped) return;
+
             // Fast check: did anything change?
             const currentRevision = this._getRevision(entityName);
-            if (currentRevision === lastRevision) return;
-            lastRevision = currentRevision;
+            if (currentRevision !== lastRevision) {
+                lastRevision = currentRevision;
 
-            // Fetch new rows since watermark
-            const newRows = this.db.query(
-                `SELECT * FROM "${entityName}" WHERE id > ? ORDER BY id ASC`
-            ).all(lastMaxId) as any[];
+                // Fetch new rows since watermark
+                const newRows = this.db.query(
+                    `SELECT * FROM "${entityName}" WHERE id > ? ORDER BY id ASC`
+                ).all(lastMaxId) as any[];
 
-            for (const rawRow of newRows) {
-                // Hydrate with entity methods and schema transforms
-                const entity = this._attachMethods(
-                    entityName,
-                    transformFromStorage(rawRow, this.schemas[entityName]!)
-                );
-                callback(entity);
-                lastMaxId = rawRow.id;
+                for (const rawRow of newRows) {
+                    if (stopped) return; // bail if unsubscribed mid-batch
+                    const entity = this._attachMethods(
+                        entityName,
+                        transformFromStorage(rawRow, this.schemas[entityName]!)
+                    );
+                    await callback(entity); // await async callbacks
+                    lastMaxId = rawRow.id;
+                }
             }
-        }, interval);
 
-        return () => clearInterval(timer);
+            // Schedule next poll only after this one is done
+            if (!stopped) setTimeout(poll, interval);
+        };
+
+        // Start the loop
+        setTimeout(poll, interval);
+
+        return () => { stopped = true; };
     }
 
     // ===========================================================================
