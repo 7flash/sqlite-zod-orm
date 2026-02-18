@@ -537,4 +537,33 @@ describe('Config-based relations — authors/books', () => {
         expect(rows.length).toBe(2);
         expect((rows[0] as any).author).toBe('Leo Tolstoy');
     });
+
+    test('where with entity reference', () => {
+        const books = cdb.books.select().where({ author: tolstoy } as any).all();
+        expect(books.length).toBe(2);
+        expect(books.map((b: any) => b.title).sort()).toEqual(['Anna Karenina', 'War and Peace']);
+    });
+
+    test('join + where with entity reference (enriched query)', () => {
+        const rows = cdb.books.select('title', 'year')
+            .join(cdb.authors, ['name', 'country'])
+            .where({ author: tolstoy } as any)
+            .orderBy('year', 'asc')
+            .all();
+        expect(rows.length).toBe(2);
+        expect((rows[0] as any).title).toBe('War and Peace');
+        expect((rows[0] as any).authors_name).toBe('Leo Tolstoy');
+        expect((rows[0] as any).authors_country).toBe('Russia');
+        expect((rows[1] as any).title).toBe('Anna Karenina');
+    });
+
+    test('join + where with dot-qualified joined column', () => {
+        const rows = cdb.books.select('title')
+            .join(cdb.authors, ['name', 'country'])
+            .where({ 'authors.country': 'Czech Republic' } as any)
+            .all();
+        expect(rows.length).toBe(1);
+        expect((rows[0] as any).title).toBe('The Trial');
+        expect((rows[0] as any).authors_country).toBe('Czech Republic');
+    });
 });

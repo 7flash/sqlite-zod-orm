@@ -86,6 +86,11 @@ export function compileIQO(tableName: string, iqo: IQO): { sql: string; params: 
         sql += ` WHERE ${compiled.sql}`;
         params.push(...compiled.params);
     } else if (iqo.wheres.length > 0) {
+        const hasJoins = iqo.joins.length > 0;
+        // When joins exist, qualify bare column names with the main table
+        const qualify = (field: string) =>
+            hasJoins && !field.includes('.') ? `${tableName}.${field}` : field;
+
         const whereParts: string[] = [];
         for (const w of iqo.wheres) {
             if (w.operator === 'IN') {
@@ -94,11 +99,11 @@ export function compileIQO(tableName: string, iqo: IQO): { sql: string; params: 
                     whereParts.push('1 = 0');
                 } else {
                     const placeholders = arr.map(() => '?').join(', ');
-                    whereParts.push(`${w.field} IN (${placeholders})`);
+                    whereParts.push(`${qualify(w.field)} IN (${placeholders})`);
                     params.push(...arr.map(transformValueForStorage));
                 }
             } else {
-                whereParts.push(`${w.field} ${w.operator} ?`);
+                whereParts.push(`${qualify(w.field)} ${w.operator} ?`);
                 params.push(transformValueForStorage(w.value));
             }
         }

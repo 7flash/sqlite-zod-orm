@@ -453,7 +453,40 @@ class _Database<Schemas extends SchemaMap> {
         // Pass revision getter — allows .subscribe() to detect ALL changes
         const revisionGetter = () => this._getRevision(entityName);
 
-        const builder = new QueryBuilder(entityName, executor, singleExecutor, joinResolver, null, revisionGetter);
+        // Condition resolver: { author: aliceEntity } → { author_id: 1 }
+        const conditionResolver = (conditions: Record<string, any>): Record<string, any> => {
+            const resolved: Record<string, any> = {};
+            for (const [key, value] of Object.entries(conditions)) {
+                // Detect entity references: objects with `id` and `delete` (augmented entities)
+                if (value && typeof value === 'object' && typeof value.id === 'number' && typeof value.delete === 'function') {
+                    // Find a belongs-to relationship: entityName has a FK named `key_id` pointing to another table
+                    const fkCol = key + '_id';
+                    const rel = this.relationships.find(
+                        r => r.type === 'belongs-to' && r.from === entityName && r.foreignKey === fkCol
+                    );
+                    if (rel) {
+                        resolved[fkCol] = value.id;
+                    } else {
+                        // Fallback: try any relationship that matches the key as the nav name
+                        const relByNav = this.relationships.find(
+                            r => r.type === 'belongs-to' && r.from === entityName && r.to === key + 's'
+                        ) || this.relationships.find(
+                            r => r.type === 'belongs-to' && r.from === entityName && r.to === key
+                        );
+                        if (relByNav) {
+                            resolved[relByNav.foreignKey] = value.id;
+                        } else {
+                            resolved[key] = value; // pass through
+                        }
+                    }
+                } else {
+                    resolved[key] = value;
+                }
+            }
+            return resolved;
+        };
+
+        const builder = new QueryBuilder(entityName, executor, singleExecutor, joinResolver, conditionResolver, revisionGetter);
         if (initialCols.length > 0) builder.select(...initialCols);
         return builder;
     }
