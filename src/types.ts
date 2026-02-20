@@ -144,6 +144,12 @@ export type UpdateBuilder<T> = {
     exec: () => number;
 };
 
+/** Fluent delete builder */
+export type DeleteBuilder<T> = {
+    where: (conditions: Record<string, any>) => DeleteBuilder<T>;
+    exec: () => number;
+};
+
 /** Nav-aware entity accessor for a specific table */
 export type NavEntityAccessor<
     S extends SchemaMap,
@@ -155,7 +161,7 @@ export type NavEntityAccessor<
     update: ((id: number, data: Partial<Omit<z.input<S[Table & keyof S]>, 'id'>>) => NavEntity<S, R, Table> | null)
     & ((data: Partial<Omit<z.input<S[Table & keyof S]>, 'id'>>) => UpdateBuilder<NavEntity<S, R, Table>>);
     upsert: (conditions?: Partial<z.infer<S[Table & keyof S]>>, data?: Partial<z.infer<S[Table & keyof S]>>) => NavEntity<S, R, Table>;
-    delete: (id: number) => void;
+    delete: ((id: number) => void) & (() => DeleteBuilder<NavEntity<S, R, Table>>);
     select: (...cols: (keyof z.infer<S[Table & keyof S]> & string)[]) => QueryBuilder<NavEntity<S, R, Table>>;
     on: ((event: 'insert' | 'update', callback: (row: NavEntity<S, R, Table>) => void | Promise<void>) => () => void) &
     ((event: 'delete', callback: (row: { id: number }) => void | Promise<void>) => () => void);
@@ -185,7 +191,7 @@ export type EntityAccessor<S extends z.ZodType<any>> = {
     insertMany: (rows: EntityData<S>[]) => AugmentedEntity<S>[];
     update: ((id: number, data: Partial<EntityData<S>>) => AugmentedEntity<S> | null) & ((data: Partial<EntityData<S>>) => UpdateBuilder<AugmentedEntity<S>>);
     upsert: (conditions?: Partial<InferSchema<S>>, data?: Partial<InferSchema<S>>) => AugmentedEntity<S>;
-    delete: (id: number) => void;
+    delete: ((id: number) => void) & (() => DeleteBuilder<AugmentedEntity<S>>);
     select: (...cols: (keyof InferSchema<S> & string)[]) => QueryBuilder<AugmentedEntity<S>>;
     on: ((event: 'insert' | 'update', callback: (row: AugmentedEntity<S>) => void | Promise<void>) => () => void) &
     ((event: 'delete', callback: (row: { id: number }) => void | Promise<void>) => () => void);

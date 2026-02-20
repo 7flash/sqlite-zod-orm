@@ -99,6 +99,9 @@ db.users.upsert(
 // ── DELETE ──────────────────────────────────────────────────
 db.users.delete(alice.id);
 alice.delete();     // on entity
+
+// Fluent (bulk):
+db.users.delete().where({ role: 'banned' }).exec();  // returns deleted count
 ```
 
 ---
@@ -430,7 +433,7 @@ src/
 
 ### Tests
 ```bash
-bun test                               # 117 tests, ~1s
+bun test                               # 121 tests, ~1s
 bun test test/crud.test.ts             # just CRUD
 bun test test/fluent.test.ts           # query builder
 bun test test/relations.test.ts        # relationships

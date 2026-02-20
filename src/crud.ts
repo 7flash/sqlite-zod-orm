@@ -4,7 +4,7 @@
  * Each function accepts a `DatabaseContext` so it can access
  * the db handle, schemas, and entity methods without tight coupling.
  */
-import type { AugmentedEntity, UpdateBuilder } from './types';
+import type { AugmentedEntity, UpdateBuilder, DeleteBuilder } from './types';
 import { asZodObject } from './types';
 import { transformForStorage, transformFromStorage } from './schema';
 import type { DatabaseContext } from './context';
@@ -116,6 +116,24 @@ export function upsert<T extends Record<string, any>>(ctx: DatabaseContext, enti
 
 export function deleteEntity(ctx: DatabaseContext, entityName: string, id: number): void {
     ctx.db.query(`DELETE FROM "${entityName}" WHERE id = ?`).run(id);
+}
+
+/** Delete all rows matching the given conditions. Returns the number of rows deleted. */
+export function deleteWhere(ctx: DatabaseContext, entityName: string, conditions: Record<string, any>): number {
+    const { clause, values } = ctx.buildWhereClause(conditions);
+    if (!clause) throw new Error('delete().where() requires at least one condition');
+    const result = ctx.db.query(`DELETE FROM "${entityName}" ${clause}`).run(...values);
+    return (result as any).changes ?? 0;
+}
+
+/** Create a fluent delete builder: db.table.delete().where({...}).exec() */
+export function createDeleteBuilder(ctx: DatabaseContext, entityName: string): DeleteBuilder<any> {
+    let _conditions: Record<string, any> = {};
+    const builder: DeleteBuilder<any> = {
+        where: (conditions) => { _conditions = { ..._conditions, ...conditions }; return builder; },
+        exec: () => deleteWhere(ctx, entityName, _conditions),
+    };
+    return builder;
 }
 
 /** Insert multiple rows in a single transaction for better performance. */

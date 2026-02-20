@@ -8,7 +8,7 @@ export type { DatabaseType } from './database';
 
 export type {
     SchemaMap, DatabaseOptions, Relationship,
-    EntityAccessor, TypedAccessors, AugmentedEntity, UpdateBuilder,
+    EntityAccessor, TypedAccessors, AugmentedEntity, UpdateBuilder, DeleteBuilder,
     InferSchema, EntityData, IndexDef, ChangeEvent,
     ProxyColumns, ColumnRef,
 } from './types';

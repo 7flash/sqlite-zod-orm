@@ -24,7 +24,7 @@ import type { DatabaseContext } from './context';
 import { buildWhereClause } from './helpers';
 import { attachMethods } from './entity';
 import {
-    insert, insertMany, update, upsert, deleteEntity,
+    insert, insertMany, update, upsert, deleteEntity, createDeleteBuilder,
     getById, getOne, findMany, updateWhere, createUpdateBuilder,
 } from './crud';
 
@@ -95,7 +95,10 @@ class _Database<Schemas extends SchemaMap> {
                     return createUpdateBuilder(this._ctx, entityName, idOrData);
                 },
                 upsert: (conditions, data) => upsert(this._ctx, entityName, data, conditions),
-                delete: (id) => deleteEntity(this._ctx, entityName, id),
+                delete: ((id?: any) => {
+                    if (typeof id === 'number') return deleteEntity(this._ctx, entityName, id);
+                    return createDeleteBuilder(this._ctx, entityName);
+                }) as any,
                 select: (...cols: string[]) => createQueryBuilder(this._ctx, entityName, cols),
                 on: (event: ChangeEvent, callback: (row: any) => void | Promise<void>) => {
                     return this._registerListener(entityName, event, callback);

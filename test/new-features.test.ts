@@ -1,6 +1,6 @@
 /**
  * Expanded CRUD tests — covers insertMany, $like, $notIn, $between,
- * .first(), .exists(), .groupBy(), .close(), upsert edge cases,
+ * .first(), .exists(), .groupBy(), .close(), deleteWhere(), upsert edge cases,
  * updateWhere, deleteEntity on non-existent id, validation errors.
  */
 
@@ -231,6 +231,54 @@ describe('CRUD edge cases', () => {
                 throw new Error('deliberate');
             });
         } catch { /* expected */ }
+        expect(db.forests.select().count()).toBe(0);
+        db.close();
+    });
+});
+
+// ==========================================================================
+// deleteWhere — fluent bulk delete
+// ==========================================================================
+
+describe('deleteWhere (fluent)', () => {
+    test('delete().where() removes matching rows', () => {
+        const db = createTestDb();
+        seedData(db);
+        const before = db.trees.select().count();
+        const deadCount = db.trees.select().where({ alive: false }).count();
+        (db.trees as any).delete().where({ alive: false }).exec();
+        // Only dead trees should be removed
+        expect(db.trees.select().count()).toBe(before - deadCount);
+        expect(db.trees.select().where({ alive: false }).exists()).toBe(false);
+        db.close();
+    });
+
+    test('delete().where() with equality condition', () => {
+        const db = createTestDb();
+        seedData(db);
+        (db.trees as any).delete().where({ name: 'Mahogany' }).exec();
+        expect(db.trees.select().where({ name: 'Mahogany' }).exists()).toBe(false);
+        // Other trees untouched
+        expect(db.trees.select().count()).toBeGreaterThan(0);
+        db.close();
+    });
+
+    test('chained where conditions narrow the delete', () => {
+        const db = createTestDb();
+        seedData(db);
+        const before = db.trees.select().where({ alive: true }).count();
+        (db.trees as any).delete().where({ alive: true }).where({ name: 'Mahogany' }).exec();
+        // Only Mahogany removed from the alive set
+        expect(db.trees.select().where({ name: 'Mahogany' }).exists()).toBe(false);
+        expect(db.trees.select().where({ alive: true }).count()).toBe(before - 1);
+        db.close();
+    });
+
+    test('delete(id) still works for single-row delete', () => {
+        const db = createTestDb();
+        const forest = db.forests.insert({ name: 'Temp', address: 'Nowhere' });
+        expect(db.forests.select().count()).toBe(1);
+        db.forests.delete(forest.id);
         expect(db.forests.select().count()).toBe(0);
         db.close();
     });
