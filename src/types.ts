@@ -206,6 +206,7 @@ export type NavEntityAccessor<
     & ((data: Partial<Omit<z.input<S[Table & keyof S]>, 'id'>>) => UpdateBuilder<NavEntity<S, R, Table>>);
     upsert: (conditions?: Partial<z.infer<S[Table & keyof S]>>, data?: Partial<z.infer<S[Table & keyof S]>>) => NavEntity<S, R, Table>;
     upsertMany: (rows: Partial<z.infer<S[Table & keyof S]>>[], conditions?: Partial<z.infer<S[Table & keyof S]>>) => NavEntity<S, R, Table>[];
+    findOrCreate: (conditions: Partial<z.infer<S[Table & keyof S]>>, defaults?: Partial<z.infer<S[Table & keyof S]>>) => { entity: NavEntity<S, R, Table>; created: boolean };
     delete: ((id: number) => void) & (() => DeleteBuilder<NavEntity<S, R, Table>>);
     restore: (id: number) => void;
     select: (...cols: (keyof z.infer<S[Table & keyof S]> & string)[]) => QueryBuilder<NavEntity<S, R, Table>>;
@@ -238,6 +239,7 @@ export type EntityAccessor<S extends z.ZodType<any>> = {
     update: ((id: number, data: Partial<EntityData<S>>) => AugmentedEntity<S> | null) & ((data: Partial<EntityData<S>>) => UpdateBuilder<AugmentedEntity<S>>);
     upsert: (conditions?: Partial<InferSchema<S>>, data?: Partial<InferSchema<S>>) => AugmentedEntity<S>;
     upsertMany: (rows: Partial<InferSchema<S>>[], conditions?: Partial<InferSchema<S>>) => AugmentedEntity<S>[];
+    findOrCreate: (conditions: Partial<InferSchema<S>>, defaults?: Partial<InferSchema<S>>) => { entity: AugmentedEntity<S>; created: boolean };
     delete: ((id: number) => void) & (() => DeleteBuilder<AugmentedEntity<S>>);
     /** Undo a soft delete by setting deletedAt = null. Requires softDeletes. */
     restore: (id: number) => void;

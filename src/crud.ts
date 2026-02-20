@@ -156,6 +156,19 @@ export function upsert<T extends Record<string, any>>(ctx: DatabaseContext, enti
     return insert(ctx, entityName, insertData);
 }
 
+/** Find a row matching conditions, or create it with the merged data. Returns { entity, created }. */
+export function findOrCreate<T extends Record<string, any>>(
+    ctx: DatabaseContext, entityName: string,
+    conditions: Record<string, any>,
+    defaults: Record<string, any> = {},
+): { entity: AugmentedEntity<any>; created: boolean } {
+    const existing = getOne(ctx, entityName, conditions);
+    if (existing) return { entity: existing, created: false };
+    const data = { ...conditions, ...defaults };
+    delete (data as any).id;
+    return { entity: insert(ctx, entityName, data), created: true };
+}
+
 export function deleteEntity(ctx: DatabaseContext, entityName: string, id: number): void {
     // beforeDelete hook — return false to cancel
     const hooks = ctx.hooks[entityName];

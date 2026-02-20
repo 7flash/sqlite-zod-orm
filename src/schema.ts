@@ -80,7 +80,9 @@ export function zodTypeToSqlType(zodType: ZodType): string {
     }
     if (zodType instanceof z.ZodString || zodType instanceof z.ZodDate) return 'TEXT';
     if (zodType instanceof z.ZodNumber || zodType instanceof z.ZodBoolean) return 'INTEGER';
+    if (zodType instanceof z.ZodEnum) return 'TEXT';
     if ((zodType as any)._def.typeName === 'ZodInstanceOf' && (zodType as any)._def.type === Buffer) return 'BLOB';
+    // z.object(), z.array(), z.record() → stored as JSON TEXT
     return 'TEXT';
 }
 
@@ -92,6 +94,9 @@ export function transformForStorage(data: Record<string, any>): Record<string, a
             transformed[key] = value.toISOString();
         } else if (typeof value === 'boolean') {
             transformed[key] = value ? 1 : 0;
+        } else if (value !== null && value !== undefined && typeof value === 'object' && !(value instanceof Buffer)) {
+            // Auto-serialize objects and arrays to JSON
+            transformed[key] = JSON.stringify(value);
         } else {
             transformed[key] = value;
         }
@@ -114,9 +119,25 @@ export function transformFromStorage(row: Record<string, any>, schema: z.ZodType
             transformed[key] = new Date(value);
         } else if (fieldSchema instanceof z.ZodBoolean && typeof value === 'number') {
             transformed[key] = value === 1;
+        } else if (isJsonSchema(fieldSchema) && typeof value === 'string') {
+            // Auto-parse JSON columns
+            try { transformed[key] = JSON.parse(value); } catch { transformed[key] = value; }
         } else {
             transformed[key] = value;
         }
     }
     return transformed;
+}
+
+/** Check if a Zod schema represents a JSON-serializable type */
+function isJsonSchema(schema: any): boolean {
+    if (!schema) return false;
+    return (
+        schema instanceof z.ZodObject ||
+        schema instanceof z.ZodArray ||
+        schema instanceof z.ZodRecord ||
+        schema instanceof z.ZodTuple ||
+        schema instanceof z.ZodUnion ||
+        schema instanceof z.ZodDiscriminatedUnion
+    );
 }

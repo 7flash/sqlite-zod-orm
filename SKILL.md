@@ -468,7 +468,51 @@ db.users.select('role').groupBy('role').countGrouped()
 
 ---
 
-## 16. Schema Validation
+## 16. findOrCreate
+
+```typescript
+const { entity, created } = db.users.findOrCreate(
+    { email: 'alice@co.com' },          // conditions to match
+    { name: 'Alice', role: 'member' },  // defaults if creating
+);
+created;       // true if new, false if found
+```
+
+---
+
+## 17. whereRaw
+
+```typescript
+// Raw SQL WHERE — escape hatch for complex conditions
+db.users.select()
+    .whereRaw('score > ? AND role != ?', [50, 'guest'])
+    .all()
+
+// Combines with .where()
+db.users.select().where({ role: 'admin' }).whereRaw('score > ?', [90]).all()
+```
+
+---
+
+## 18. JSON Columns
+
+```typescript
+const ConfigSchema = z.object({
+    name: z.string(),
+    settings: z.object({ theme: z.string(), notifications: z.boolean() }),
+    tags: z.array(z.string()).default([]),
+});
+const db = new Database(':memory:', { configs: ConfigSchema });
+
+// Objects/arrays auto-serialize to JSON TEXT on write
+const c = db.configs.insert({ name: 'u1', settings: { theme: 'dark', notifications: true } });
+c.settings.theme;  // 'dark' — auto-parsed back to object on read
+c.tags;            // [] — arrays too
+```
+
+---
+
+## 19. Schema Validation
 
 Zod validates every insert and update:
 ```typescript
@@ -485,7 +529,7 @@ user.score; // → 0 (from z.number().int().default(0))
 
 ---
 
-## 17. Common Patterns
+## 20. Common Patterns
 
 ### Chat/message storage
 ```typescript
@@ -605,7 +649,7 @@ src/
 
 ### Tests
 ```bash
-bun test                               # 174 tests, ~1.4s
+bun test                               # 184 tests, ~1.2s
 bun test test/crud.test.ts             # just CRUD
 bun test test/fluent.test.ts           # query builder
 bun test test/relations.test.ts        # relationships

@@ -31,6 +31,7 @@ export interface IQO {
     selects: string[];
     wheres: WhereCondition[];
     whereOrs: WhereCondition[][];  // Each sub-array is an OR group
+    rawWheres: { sql: string; params: any[] }[];  // Raw WHERE fragments
     whereAST: ASTNode | null;
     joins: JoinClause[];
     groupBy: string[];
@@ -159,6 +160,14 @@ export function compileIQO(tableName: string, iqo: IQO): { sql: string; params: 
                 const orClause = `(${orParts.join(' OR ')})`;
                 sql += sql.includes(' WHERE ') ? ` AND ${orClause}` : ` WHERE ${orClause}`;
             }
+        }
+    }
+
+    // Append raw WHERE fragments
+    if (iqo.rawWheres && iqo.rawWheres.length > 0) {
+        for (const rw of iqo.rawWheres) {
+            sql += sql.includes(' WHERE ') ? ` AND (${rw.sql})` : ` WHERE (${rw.sql})`;
+            params.push(...rw.params);
         }
     }
 

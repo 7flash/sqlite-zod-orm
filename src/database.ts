@@ -24,7 +24,7 @@ import type { DatabaseContext } from './context';
 import { buildWhereClause } from './helpers';
 import { attachMethods } from './entity';
 import {
-    insert, insertMany, update, upsert, upsertMany, deleteEntity, createDeleteBuilder,
+    insert, insertMany, update, upsert, upsertMany, findOrCreate, deleteEntity, createDeleteBuilder,
     getById, getOne, findMany, updateWhere, createUpdateBuilder,
 } from './crud';
 
@@ -107,6 +107,7 @@ class _Database<Schemas extends SchemaMap> {
                 },
                 upsert: (conditions, data) => upsert(this._ctx, entityName, data, conditions),
                 upsertMany: (rows: any[], conditions?: any) => upsertMany(this._ctx, entityName, rows, conditions),
+                findOrCreate: (conditions: any, defaults?: any) => findOrCreate(this._ctx, entityName, conditions, defaults),
                 delete: ((id?: any) => {
                     if (typeof id === 'number') {
                         // beforeDelete hook — return false to cancel

@@ -54,6 +54,7 @@ export class QueryBuilder<T extends Record<string, any>> {
             selects: [],
             wheres: [],
             whereOrs: [],
+            rawWheres: [],
             whereAST: null,
             joins: [],
             groupBy: [],
@@ -212,6 +213,19 @@ export class QueryBuilder<T extends Record<string, any>> {
     /** Skip Zod parsing and return raw SQLite row objects. */
     raw(): this {
         this.iqo.raw = true;
+        return this;
+    }
+
+    /**
+     * Add a raw SQL WHERE fragment with parameterized values.
+     * Can be combined with `.where()` — fragments are AND'd together.
+     *
+     * ```ts
+     * db.users.select().whereRaw('score > ? AND role != ?', [50, 'guest']).all()
+     * ```
+     */
+    whereRaw(sql: string, params: any[] = []): this {
+        this.iqo.rawWheres.push({ sql, params });
         return this;
     }
 
