@@ -92,6 +92,7 @@ class _Database<Schemas extends SchemaMap> {
         if (this._reactive) this.initializeChangeTracking();
         this.runMigrations();
         if (options.indexes) this.createIndexes(options.indexes);
+        if (options.unique) this.createUniqueConstraints(options.unique);
 
         // Create typed entity accessors (db.users, db.posts, etc.)
         for (const entityName of Object.keys(schemas)) {
@@ -109,12 +110,17 @@ class _Database<Schemas extends SchemaMap> {
                         if (this._softDeletes) {
                             // Soft delete: set deletedAt instead of removing
                             const now = new Date().toISOString();
-                            this.db.run(`UPDATE "${entityName}" SET "deletedAt" = ? WHERE id = ?`, now, id);
+                            this.db.query(`UPDATE "${entityName}" SET "deletedAt" = ? WHERE id = ?`).run(now, id);
                             return;
                         }
                         return deleteEntity(this._ctx, entityName, id);
                     }
                     return createDeleteBuilder(this._ctx, entityName);
+                }) as any,
+                restore: ((id: number) => {
+                    if (!this._softDeletes) throw new Error('restore() requires softDeletes: true');
+                    if (this._debug) console.log('[satidb]', `UPDATE "${entityName}" SET "deletedAt" = NULL WHERE id = ?`, [id]);
+                    this.db.query(`UPDATE "${entityName}" SET "deletedAt" = NULL WHERE id = ?`).run(id);
                 }) as any,
                 select: (...cols: string[]) => createQueryBuilder(this._ctx, entityName, cols),
                 on: (event: ChangeEvent, callback: (row: any) => void | Promise<void>) => {
@@ -228,6 +234,15 @@ class _Database<Schemas extends SchemaMap> {
         }
     }
 
+    private createUniqueConstraints(unique: Record<string, string[][]>): void {
+        for (const [tableName, groups] of Object.entries(unique)) {
+            for (const cols of groups) {
+                const idxName = `uq_${tableName}_${cols.join('_')}`;
+                this.db.run(`CREATE UNIQUE INDEX IF NOT EXISTS "${idxName}" ON "${tableName}" (${cols.map(c => `"${c}"`).join(', ')})`);
+            }
+        }
+    }
+
     // =========================================================================
     // Change Listeners — db.table.on('insert' | 'update' | 'delete', cb)
     // =========================================================================
@@ -306,7 +321,7 @@ class _Database<Schemas extends SchemaMap> {
         }
 
         // Clean up consumed changes
-        this.db.run('DELETE FROM "_changes" WHERE id <= ?', this._changeWatermark);
+        this.db.query('DELETE FROM "_changes" WHERE id <= ?').run(this._changeWatermark);
     }
 
     // =========================================================================
@@ -355,6 +370,20 @@ class _Database<Schemas extends SchemaMap> {
     public exec(sql: string, ...params: any[]): void {
         if (this._debug) console.log('[satidb]', sql, params);
         this.db.run(sql, ...params);
+    }
+
+    // =========================================================================
+    // Schema Introspection
+    // =========================================================================
+
+    /** Return the list of user-defined table names. */
+    public tables(): string[] {
+        return Object.keys(this.schemas);
+    }
+
+    /** Return column info for a table via PRAGMA table_info. */
+    public columns(tableName: string): { name: string; type: string; notnull: number; pk: number }[] {
+        return this.db.query(`PRAGMA table_info("${tableName}")`).all() as any[];
     }
 }
 

@@ -166,8 +166,8 @@ describe('paginate()', () => {
         expect(page1.page).toBe(1);
         expect(page1.perPage).toBe(2);
         expect(page1.pages).toBe(3); // ceil(5/2) = 3
-        expect(page1.data[0].name).toBe('Alice');
-        expect(page1.data[1].name).toBe('Bob');
+        expect(page1.data[0]!.name).toBe('Alice');
+        expect(page1.data[1]!.name).toBe('Bob');
         db.close();
     });
 
@@ -176,8 +176,8 @@ describe('paginate()', () => {
         seedUsers(db);
         const page2 = db.users.select().orderBy('name').paginate(2, 2);
         expect(page2.data.length).toBe(2);
-        expect(page2.data[0].name).toBe('Carol');
-        expect(page2.data[1].name).toBe('Dave');
+        expect(page2.data[0]!.name).toBe('Carol');
+        expect(page2.data[1]!.name).toBe('Dave');
         db.close();
     });
 
@@ -186,7 +186,7 @@ describe('paginate()', () => {
         seedUsers(db);
         const page3 = db.users.select().orderBy('name').paginate(3, 2);
         expect(page3.data.length).toBe(1);
-        expect(page3.data[0].name).toBe('Eve');
+        expect(page3.data[0]!.name).toBe('Eve');
         db.close();
     });
 });
@@ -200,7 +200,7 @@ describe('db.raw() and db.exec()', () => {
         seedUsers(db);
         const rows = db.raw<{ name: string }>('SELECT name FROM users ORDER BY name');
         expect(rows.length).toBe(5);
-        expect(rows[0].name).toBe('Alice');
+        expect(rows[0]!.name).toBe('Alice');
         db.close();
     });
 
@@ -290,7 +290,7 @@ describe('soft deletes', () => {
         db.users.delete(bob.id);
         const all = db.users.select().all();
         expect(all.length).toBe(1);
-        expect(all[0].name).toBe('Alice');
+        expect(all[0]!.name).toBe('Alice');
         db.close();
     });
 
@@ -356,10 +356,10 @@ describe('auto-migration', () => {
         db2.items.insert({ name: 'bar', color: 'red' });
         const rows = db2.items.select().all();
         expect(rows.length).toBe(2);
-        expect(rows[1].name).toBe('bar');
-        expect(rows[1].color).toBe('red');
+        expect(rows[1]!.name).toBe('bar');
+        expect(rows[1]!.color).toBe('red');
         // Original row should have null for new column
-        expect(rows[0].color == null).toBe(true);
+        expect(rows[0]!.color == null).toBe(true);
         db2.close();
         // Cleanup
         try { require('fs').unlinkSync(path); } catch { }

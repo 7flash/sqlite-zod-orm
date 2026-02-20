@@ -116,14 +116,14 @@ separator('TEST 2: Category filter — WHERE role = ?');
 {
     const stmt = dbNoIdx.query('SELECT * FROM users WHERE role = ?');
     bench('No index', () => {
-        stmt.all(roles[Math.floor(Math.random() * roles.length)]);
+        stmt.all(roles[Math.floor(Math.random() * roles.length)]!);
     });
 }
 
 {
     const stmt = dbIdx.query('SELECT * FROM users WHERE role = ?');
     bench('With index (role)', () => {
-        stmt.all(roles[Math.floor(Math.random() * roles.length)]);
+        stmt.all(roles[Math.floor(Math.random() * roles.length)]!);
     });
 }
 
@@ -156,14 +156,14 @@ separator('TEST 4: Compound — WHERE role = ? AND score > ? LIMIT 50');
 {
     const stmt = dbNoIdx.query('SELECT * FROM users WHERE role = ? AND score > ? LIMIT 50');
     bench('No index', () => {
-        stmt.all(roles[Math.floor(Math.random() * roles.length)], Math.floor(Math.random() * 500));
+        stmt.all(roles[Math.floor(Math.random() * roles.length)]!, Math.floor(Math.random() * 500));
     });
 }
 
 {
     const stmt = dbIdx.query('SELECT * FROM users WHERE role = ? AND score > ? LIMIT 50');
     bench('With compound index (role, score)', () => {
-        stmt.all(roles[Math.floor(Math.random() * roles.length)], Math.floor(Math.random() * 500));
+        stmt.all(roles[Math.floor(Math.random() * roles.length)]!, Math.floor(Math.random() * 500));
     });
 }
 
@@ -192,14 +192,14 @@ separator('TEST 6: COUNT — SELECT COUNT(*) WHERE role = ?');
 {
     const stmt = dbNoIdx.query('SELECT COUNT(*) as c FROM users WHERE role = ?');
     bench('No index', () => {
-        stmt.get(roles[Math.floor(Math.random() * roles.length)]);
+        stmt.get(roles[Math.floor(Math.random() * roles.length)]!);
     });
 }
 
 {
     const stmt = dbIdx.query('SELECT COUNT(*) as c FROM users WHERE role = ?');
     bench('With index (role)', () => {
-        stmt.get(roles[Math.floor(Math.random() * roles.length)]);
+        stmt.get(roles[Math.floor(Math.random() * roles.length)]!);
     });
 }
 

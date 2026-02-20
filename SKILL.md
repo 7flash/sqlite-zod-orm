@@ -379,6 +379,15 @@ db.users.select().all();  // only non-deleted
 
 // Include soft-deleted:
 db.users.select().withTrashed().all();  // all rows including deleted
+
+// Query only deleted rows:
+db.users.select().onlyTrashed().all();  // only soft-deleted
+
+// Restore a soft-deleted row:
+db.users.restore(user.id);  // sets deletedAt = null
+
+// Batch soft delete:
+db.users.delete().where({ score: { $lt: 10 } }).exec();  // soft-deletes matching rows
 ```
 
 ---
@@ -392,7 +401,31 @@ const db = new Database('app.db', schemas, { debug: true });
 
 ---
 
-## 11. Schema Validation
+## 11. Unique Constraints
+
+```typescript
+const db = new Database('app.db', schemas, {
+    unique: {
+        users: [['email']],                 // single column unique
+        posts: [['slug'], ['title', 'author_id']], // multiple unique constraints
+    },
+});
+db.users.insert({ name: 'Bob', email: 'bob@co.com' });  // OK
+db.users.insert({ name: 'Bob2', email: 'bob@co.com' }); // throws — duplicate email
+```
+
+---
+
+## 12. Schema Introspection
+
+```typescript
+db.tables();            // ['users', 'posts'] — user-defined table names
+db.columns('users');    // [{ name: 'id', type: 'INTEGER', ... }, { name: 'email', type: 'TEXT', ... }]
+```
+
+---
+
+## 13. Schema Validation
 
 Zod validates every insert and update:
 ```typescript
@@ -409,7 +442,7 @@ user.score; // → 0 (from z.number().int().default(0))
 
 ---
 
-## 12. Common Patterns
+## 14. Common Patterns
 
 ### Chat/message storage
 ```typescript
@@ -529,7 +562,7 @@ src/
 
 ### Tests
 ```bash
-bun test                               # 148 tests, ~1.5s
+bun test                               # 160 tests, ~1.5s
 bun test test/crud.test.ts             # just CRUD
 bun test test/fluent.test.ts           # query builder
 bun test test/relations.test.ts        # relationships

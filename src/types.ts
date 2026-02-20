@@ -22,6 +22,12 @@ export type IndexDef = string | string[];
 export type DatabaseOptions<R extends RelationsConfig = RelationsConfig> = {
     indexes?: Record<string, IndexDef[]>;
     /**
+     * Unique constraints per table. Each entry is an array of column groups.
+     * Single column: `{ users: [['email']] }` → UNIQUE INDEX.
+     * Compound: `{ users: [['email'], ['name', 'org_id']] }` → two UNIQUE indexes.
+     */
+    unique?: Record<string, string[][]>;
+    /**
      * Declare relationships between tables.
      *
      * Format: `{ childTable: { fkColumn: 'parentTable' } }`
@@ -179,6 +185,7 @@ export type NavEntityAccessor<
     & ((data: Partial<Omit<z.input<S[Table & keyof S]>, 'id'>>) => UpdateBuilder<NavEntity<S, R, Table>>);
     upsert: (conditions?: Partial<z.infer<S[Table & keyof S]>>, data?: Partial<z.infer<S[Table & keyof S]>>) => NavEntity<S, R, Table>;
     delete: ((id: number) => void) & (() => DeleteBuilder<NavEntity<S, R, Table>>);
+    restore: (id: number) => void;
     select: (...cols: (keyof z.infer<S[Table & keyof S]> & string)[]) => QueryBuilder<NavEntity<S, R, Table>>;
     on: ((event: 'insert' | 'update', callback: (row: NavEntity<S, R, Table>) => void | Promise<void>) => () => void) &
     ((event: 'delete', callback: (row: { id: number }) => void | Promise<void>) => () => void);
@@ -209,6 +216,8 @@ export type EntityAccessor<S extends z.ZodType<any>> = {
     update: ((id: number, data: Partial<EntityData<S>>) => AugmentedEntity<S> | null) & ((data: Partial<EntityData<S>>) => UpdateBuilder<AugmentedEntity<S>>);
     upsert: (conditions?: Partial<InferSchema<S>>, data?: Partial<InferSchema<S>>) => AugmentedEntity<S>;
     delete: ((id: number) => void) & (() => DeleteBuilder<AugmentedEntity<S>>);
+    /** Undo a soft delete by setting deletedAt = null. Requires softDeletes. */
+    restore: (id: number) => void;
     select: (...cols: (keyof InferSchema<S> & string)[]) => QueryBuilder<AugmentedEntity<S>>;
     on: ((event: 'insert' | 'update', callback: (row: AugmentedEntity<S>) => void | Promise<void>) => () => void) &
     ((event: 'delete', callback: (row: { id: number }) => void | Promise<void>) => () => void);

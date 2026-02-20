@@ -134,11 +134,23 @@ export function deleteEntity(ctx: DatabaseContext, entityName: string, id: numbe
     ctx.db.query(`DELETE FROM "${entityName}" WHERE id = ?`).run(id);
 }
 
-/** Delete all rows matching the given conditions. Returns the number of rows deleted. */
+/** Delete all rows matching the given conditions. Returns the number of rows affected. */
 export function deleteWhere(ctx: DatabaseContext, entityName: string, conditions: Record<string, any>): number {
     const { clause, values } = ctx.buildWhereClause(conditions);
     if (!clause) throw new Error('delete().where() requires at least one condition');
-    const result = ctx.db.query(`DELETE FROM "${entityName}" ${clause}`).run(...values);
+
+    if (ctx.softDeletes) {
+        // Soft delete: set deletedAt instead of removing rows
+        const now = new Date().toISOString();
+        const sql = `UPDATE "${entityName}" SET "deletedAt" = ? ${clause}`;
+        if (ctx.debug) console.log('[satidb]', sql, [now, ...values]);
+        const result = ctx.db.query(sql).run(now, ...values);
+        return (result as any).changes ?? 0;
+    }
+
+    const sql = `DELETE FROM "${entityName}" ${clause}`;
+    if (ctx.debug) console.log('[satidb]', sql, values);
+    const result = ctx.db.query(sql).run(...values);
     return (result as any).changes ?? 0;
 }
 

@@ -314,6 +314,19 @@ export class QueryBuilder<T extends Record<string, any>> {
     }
 
     /**
+     * Return only soft-deleted rows.
+     * Only relevant when `softDeletes: true` is set in Database options.
+     */
+    onlyTrashed(): this {
+        // Remove the auto-injected `deletedAt IS NULL` and add `deletedAt IS NOT NULL`
+        this.iqo.wheres = this.iqo.wheres.filter(
+            w => !(w.field === 'deletedAt' && w.operator === 'IS NULL')
+        );
+        this.iqo.wheres.push({ field: 'deletedAt', operator: 'IS NOT NULL', value: null });
+        return this;
+    }
+
+    /**
      * Add HAVING conditions (used after groupBy for aggregate filtering).
      *
      * ```ts

@@ -119,7 +119,7 @@ test('column proxy returns column AST nodes', () => {
 
 test('function proxy returns function AST nodes with UPPER name', () => {
     const f = createFunctionProxy();
-    const node = f.lower({ type: 'column', name: 'x' });
+    const node = f.lower!({ type: 'column', name: 'x' });
     expect(node.type).toBe('function');
     expect((node as any).name).toBe('LOWER');
     expect((node as any).args.length).toBe(1);
@@ -127,7 +127,7 @@ test('function proxy returns function AST nodes with UPPER name', () => {
 
 test('function proxy wraps raw values via wrapNode', () => {
     const f = createFunctionProxy();
-    const node = f.concat({ type: 'column', name: 'a' }, ' - ', { type: 'column', name: 'b' });
+    const node = f.concat!({ type: 'column', name: 'a' }, ' - ', { type: 'column', name: 'b' });
     expect((node as any).args.length).toBe(3);
     expect((node as any).args[1].type).toBe('literal'); // raw string wrapped
 });
@@ -178,7 +178,7 @@ test('end-to-end: proxy → AST → SQL', () => {
     const f = createFunctionProxy();
 
     const ast = op.and(
-        op.eq(f.lower(c.name), 'alice'),
+        op.eq(f.lower!(c.name), 'alice'),
         op.gte(c.age, 18),
     );
 
