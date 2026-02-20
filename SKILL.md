@@ -64,10 +64,18 @@ const alice = db.users.insert({ name: 'Alice', email: 'alice@co.com' });
 // Insert with FK
 const post = db.posts.insert({ title: 'Hello', body: '...', user_id: alice.id });
 
+// Bulk insert (transactional — fast)
+const users = db.users.insertMany([
+    { name: 'Bob', email: 'bob@co.com' },
+    { name: 'Carol', email: 'carol@co.com' },
+]);
+
 // ── READ ────────────────────────────────────────────────────
 const one  = db.users.select().where({ id: 1 }).get();        // single row or null
+const same = db.users.select().where({ id: 1 }).first();       // alias for .get()
 const all  = db.users.select().all();                           // array
 const count = db.users.select().count();                        // number
+const has  = db.users.select().where({ role: 'admin' }).exists(); // boolean
 
 // ── UPDATE ──────────────────────────────────────────────────
 // By ID:
@@ -102,7 +110,7 @@ alice.delete();     // on entity
 const admins = db.users.select().where({ role: 'admin' }).all();
 ```
 
-### Operators: `$gt` `$gte` `$lt` `$lte` `$ne` `$in`
+### Operators: `$gt` `$gte` `$lt` `$lte` `$ne` `$in` `$like` `$notIn` `$between`
 ```typescript
 const top = db.users.select()
     .where({ score: { $gt: 50 } })
@@ -116,6 +124,18 @@ const specific = db.users.select()
 
 const notGuest = db.users.select()
     .where({ role: { $ne: 'guest' } })
+    .all();
+
+const matches = db.users.select()
+    .where({ name: { $like: '%Ali%' } })
+    .all();
+
+const excluded = db.users.select()
+    .where({ role: { $notIn: ['banned', 'suspended'] } })
+    .all();
+
+const range = db.posts.select()
+    .where({ year: { $between: [2020, 2025] } })
     .all();
 ```
 
@@ -143,6 +163,11 @@ const page2 = db.users.select()
 ### Count with filter
 ```typescript
 const activeCount = db.users.select().where({ role: { $ne: 'banned' } }).count();
+```
+
+### Group by
+```typescript
+const byRole = db.users.select('role').groupBy('role').raw().all();
 ```
 
 ---
@@ -261,6 +286,12 @@ const result = db.transaction(() => {
     return { user, post };
 });
 // Automatically rolls back on error — nothing is committed
+```
+
+### Cleanup
+```typescript
+// Close the database when shutting down (stops poller, releases SQLite handle)
+db.close();
 ```
 
 ---
@@ -399,7 +430,7 @@ src/
 
 ### Tests
 ```bash
-bun test                               # 95 tests, ~1s
+bun test                               # 117 tests, ~1s
 bun test test/crud.test.ts             # just CRUD
 bun test test/fluent.test.ts           # query builder
 bun test test/relations.test.ts        # relationships
@@ -408,6 +439,7 @@ bun test test/reactivity.test.ts       # .on() listeners
 bun test test/ast.test.ts              # AST compiler (unit)
 bun test test/query-builder.test.ts    # IQO compiler (unit)
 bun test test/proxy-query.test.ts      # proxy query (unit)
+bun test test/new-features.test.ts     # new operators, insertMany, groupBy, etc.
 ```
 
 Each test file creates its own `:memory:` DB via `createTestDb()` from `test/setup.ts`.

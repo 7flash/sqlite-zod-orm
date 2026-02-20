@@ -1,6 +1,6 @@
 {
   "name": "sqlite-zod-orm",
-  "version": "3.8.0",
+  "version": "3.9.0",
   "description": "Type-safe SQLite ORM for Bun — Zod schemas, fluent queries, auto relationships, zero SQL",
   "type": "module",
   "main": "./dist/index.js",
@@ -14,7 +14,9 @@
   },
   "scripts": {
     "build": "bun build ./src/index.ts --outdir ./dist --target bun --format esm",
+    "clean": "rm -rf dist",
     "test": "bun test",
+    "bench": "bun bench/triggers-vs-naive.ts && bun bench/poll-strategy.ts && bun bench/indexes.ts",
     "prepublishOnly": "bun run build"
   },
   "files": [

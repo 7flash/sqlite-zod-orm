@@ -24,7 +24,7 @@ import type { DatabaseContext } from './context';
 import { buildWhereClause } from './helpers';
 import { attachMethods } from './entity';
 import {
-    insert, update, upsert, deleteEntity,
+    insert, insertMany, update, upsert, deleteEntity,
     getById, getOne, findMany, updateWhere, createUpdateBuilder,
 } from './crud';
 
@@ -89,6 +89,7 @@ class _Database<Schemas extends SchemaMap> {
             const key = entityName as keyof Schemas;
             const accessor: EntityAccessor<Schemas[typeof key]> = {
                 insert: (data) => insert(this._ctx, entityName, data),
+                insertMany: (rows: any[]) => insertMany(this._ctx, entityName, rows),
                 update: (idOrData: any, data?: any) => {
                     if (typeof idOrData === 'number') return update(this._ctx, entityName, idOrData, data);
                     return createUpdateBuilder(this._ctx, entityName, idOrData);
@@ -112,19 +113,19 @@ class _Database<Schemas extends SchemaMap> {
     private initializeTables(): void {
         for (const [entityName, schema] of Object.entries(this.schemas)) {
             const storableFields = getStorableFields(schema);
-            const columnDefs = storableFields.map(f => `${f.name} ${zodTypeToSqlType(f.type)}`);
+            const columnDefs = storableFields.map(f => `"${f.name}" ${zodTypeToSqlType(f.type)}`);
             const constraints: string[] = [];
 
             const belongsToRels = this.relationships.filter(
                 rel => rel.type === 'belongs-to' && rel.from === entityName
             );
             for (const rel of belongsToRels) {
-                constraints.push(`FOREIGN KEY (${rel.foreignKey}) REFERENCES ${rel.to}(id) ON DELETE SET NULL`);
+                constraints.push(`FOREIGN KEY ("${rel.foreignKey}") REFERENCES "${rel.to}"(id) ON DELETE SET NULL`);
             }
 
             const allCols = columnDefs.join(', ');
             const allConstraints = constraints.length > 0 ? ', ' + constraints.join(', ') : '';
-            this.db.run(`CREATE TABLE IF NOT EXISTS ${entityName} (id INTEGER PRIMARY KEY AUTOINCREMENT, ${allCols}${allConstraints})`);
+            this.db.run(`CREATE TABLE IF NOT EXISTS "${entityName}" (id INTEGER PRIMARY KEY AUTOINCREMENT, ${allCols}${allConstraints})`);
         }
     }
 
@@ -136,7 +137,7 @@ class _Database<Schemas extends SchemaMap> {
      * row-level change detection for the `on()` API.
      */
     private initializeChangeTracking(): void {
-        this.db.run(`CREATE TABLE IF NOT EXISTS _changes (
+        this.db.run(`CREATE TABLE IF NOT EXISTS "_changes" (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tbl TEXT NOT NULL,
             op TEXT NOT NULL,
@@ -145,42 +146,42 @@ class _Database<Schemas extends SchemaMap> {
 
         for (const entityName of Object.keys(this.schemas)) {
             // INSERT trigger — logs NEW.id
-            this.db.run(`CREATE TRIGGER IF NOT EXISTS _trg_${entityName}_insert
-                AFTER INSERT ON ${entityName}
+            this.db.run(`CREATE TRIGGER IF NOT EXISTS "_trg_${entityName}_insert"
+                AFTER INSERT ON "${entityName}"
                 BEGIN
-                    INSERT INTO _changes (tbl, op, row_id) VALUES ('${entityName}', 'insert', NEW.id);
+                    INSERT INTO "_changes" (tbl, op, row_id) VALUES ('${entityName}', 'insert', NEW.id);
                 END`);
 
             // UPDATE trigger — logs NEW.id (post-update row)
-            this.db.run(`CREATE TRIGGER IF NOT EXISTS _trg_${entityName}_update
-                AFTER UPDATE ON ${entityName}
+            this.db.run(`CREATE TRIGGER IF NOT EXISTS "_trg_${entityName}_update"
+                AFTER UPDATE ON "${entityName}"
                 BEGIN
-                    INSERT INTO _changes (tbl, op, row_id) VALUES ('${entityName}', 'update', NEW.id);
+                    INSERT INTO "_changes" (tbl, op, row_id) VALUES ('${entityName}', 'update', NEW.id);
                 END`);
 
             // DELETE trigger — logs OLD.id (row that was deleted)
-            this.db.run(`CREATE TRIGGER IF NOT EXISTS _trg_${entityName}_delete
-                AFTER DELETE ON ${entityName}
+            this.db.run(`CREATE TRIGGER IF NOT EXISTS "_trg_${entityName}_delete"
+                AFTER DELETE ON "${entityName}"
                 BEGIN
-                    INSERT INTO _changes (tbl, op, row_id) VALUES ('${entityName}', 'delete', OLD.id);
+                    INSERT INTO "_changes" (tbl, op, row_id) VALUES ('${entityName}', 'delete', OLD.id);
                 END`);
         }
 
         // Initialize watermark to current max (skip replaying historical changes)
-        const row = this.db.query('SELECT MAX(id) as maxId FROM _changes').get() as any;
+        const row = this.db.query('SELECT MAX(id) as maxId FROM "_changes"').get() as any;
         this._changeWatermark = row?.maxId ?? 0;
     }
 
     private runMigrations(): void {
         for (const [entityName, schema] of Object.entries(this.schemas)) {
-            const existingColumns = this.db.query(`PRAGMA table_info(${entityName})`).all() as any[];
+            const existingColumns = this.db.query(`PRAGMA table_info("${entityName}")`).all() as any[];
             const existingNames = new Set(existingColumns.map(c => c.name));
 
             const storableFields = getStorableFields(schema);
             for (const field of storableFields) {
                 if (!existingNames.has(field.name)) {
                     const sqlType = zodTypeToSqlType(field.type);
-                    this.db.run(`ALTER TABLE ${entityName} ADD COLUMN ${field.name} ${sqlType}`);
+                    this.db.run(`ALTER TABLE "${entityName}" ADD COLUMN "${field.name}" ${sqlType}`);
                 }
             }
         }
@@ -191,7 +192,7 @@ class _Database<Schemas extends SchemaMap> {
             for (const def of indexDefs) {
                 const cols = Array.isArray(def) ? def : [def];
                 const idxName = `idx_${tableName}_${cols.join('_')}`;
-                this.db.run(`CREATE INDEX IF NOT EXISTS ${idxName} ON ${tableName} (${cols.join(', ')})`);
+                this.db.run(`CREATE INDEX IF NOT EXISTS "${idxName}" ON "${tableName}" (${cols.map(c => `"${c}"`).join(', ')})`);
             }
         }
     }
@@ -239,12 +240,12 @@ class _Database<Schemas extends SchemaMap> {
      */
     private _processChanges(): void {
         // Fast path: check if anything changed at all (single scalar, index-only)
-        const head = this.db.query('SELECT MAX(id) as m FROM _changes').get() as any;
+        const head = this.db.query('SELECT MAX(id) as m FROM "_changes"').get() as any;
         const maxId: number = head?.m ?? 0;
         if (maxId <= this._changeWatermark) return;
 
         const changes = this.db.query(
-            'SELECT id, tbl, op, row_id FROM _changes WHERE id > ? ORDER BY id'
+            'SELECT id, tbl, op, row_id FROM "_changes" WHERE id > ? ORDER BY id'
         ).all(this._changeWatermark) as { id: number; tbl: string; op: string; row_id: number }[];
 
         for (const change of changes) {
@@ -274,7 +275,7 @@ class _Database<Schemas extends SchemaMap> {
         }
 
         // Clean up consumed changes
-        this.db.run('DELETE FROM _changes WHERE id <= ?', this._changeWatermark);
+        this.db.run('DELETE FROM "_changes" WHERE id <= ?', this._changeWatermark);
     }
 
     // =========================================================================
@@ -282,15 +283,13 @@ class _Database<Schemas extends SchemaMap> {
     // =========================================================================
 
     public transaction<T>(callback: () => T): T {
-        try {
-            this.db.run('BEGIN TRANSACTION');
-            const result = callback();
-            this.db.run('COMMIT');
-            return result;
-        } catch (error) {
-            this.db.run('ROLLBACK');
-            throw new Error(`Transaction failed: ${(error as Error).message}`);
-        }
+        return this.db.transaction(callback)();
+    }
+
+    /** Close the database: stops polling and releases the SQLite handle. */
+    public close(): void {
+        this._stopPolling();
+        this.db.close();
     }
 
     // =========================================================================

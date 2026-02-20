@@ -7,7 +7,8 @@
  * - Proxy query system (db.query() with destructured table aliases)
  * - QueryBuilder factory (wires executors, resolvers, and loaders)
  */
-import { z } from 'zod';
+
+import type { z } from 'zod';
 import {
     type ASTNode, type WhereCallback, type TypedColumnProxy, type FunctionProxy, type Operators,
     compileAST, wrapNode, createColumnProxy, createFunctionProxy, op,
@@ -20,11 +21,11 @@ import type { DatabaseContext } from './context';
 // =============================================================================
 
 type OrderDirection = 'asc' | 'desc';
-type WhereOperator = '$gt' | '$gte' | '$lt' | '$lte' | '$ne' | '$in';
+type WhereOperator = '$gt' | '$gte' | '$lt' | '$lte' | '$ne' | '$in' | '$like' | '$notIn' | '$between';
 
 interface WhereCondition {
     field: string;
-    operator: '=' | '>' | '>=' | '<' | '<=' | '!=' | 'IN';
+    operator: '=' | '>' | '>=' | '<' | '<=' | '!=' | 'IN' | 'LIKE' | 'NOT IN' | 'BETWEEN';
     value: any;
 }
 
@@ -41,6 +42,7 @@ interface IQO {
     whereOrs: WhereCondition[][];  // Each sub-array is an OR group
     whereAST: ASTNode | null;
     joins: JoinClause[];
+    groupBy: string[];
     limit: number | null;
     offset: number | null;
     orderBy: { field: string; direction: OrderDirection }[];
@@ -55,6 +57,9 @@ const OPERATOR_MAP: Record<WhereOperator, string> = {
     $lte: '<=',
     $ne: '!=',
     $in: 'IN',
+    $like: 'LIKE',
+    $notIn: 'NOT IN',
+    $between: 'BETWEEN',
 };
 
 function transformValueForStorage(value: any): any {
@@ -113,12 +118,24 @@ export function compileIQO(tableName: string, iqo: IQO): { sql: string; params: 
                     whereParts.push(`${qualify(w.field)} IN (${placeholders})`);
                     params.push(...arr.map(transformValueForStorage));
                 }
+            } else if (w.operator === 'NOT IN') {
+                const arr = w.value as any[];
+                if (arr.length === 0) continue; // no-op
+                const placeholders = arr.map(() => '?').join(', ');
+                whereParts.push(`${qualify(w.field)} NOT IN (${placeholders})`);
+                params.push(...arr.map(transformValueForStorage));
+            } else if (w.operator === 'BETWEEN') {
+                const [min, max] = w.value as [any, any];
+                whereParts.push(`${qualify(w.field)} BETWEEN ? AND ?`);
+                params.push(transformValueForStorage(min), transformValueForStorage(max));
             } else {
                 whereParts.push(`${qualify(w.field)} ${w.operator} ?`);
                 params.push(transformValueForStorage(w.value));
             }
         }
-        sql += ` WHERE ${whereParts.join(' AND ')}`;
+        if (whereParts.length > 0) {
+            sql += ` WHERE ${whereParts.join(' AND ')}`;
+        }
     }
 
     // Append OR groups (from $or)
@@ -144,6 +161,11 @@ export function compileIQO(tableName: string, iqo: IQO): { sql: string; params: 
                 sql += sql.includes(' WHERE ') ? ` AND ${orClause}` : ` WHERE ${orClause}`;
             }
         }
+    }
+
+    // GROUP BY
+    if (iqo.groupBy.length > 0) {
+        sql += ` GROUP BY ${iqo.groupBy.join(', ')}`;
     }
 
     // ORDER BY
@@ -200,6 +222,7 @@ export class QueryBuilder<T extends Record<string, any>> {
             whereOrs: [],
             whereAST: null,
             joins: [],
+            groupBy: [],
             limit: null,
             offset: null,
             orderBy: [],
@@ -274,6 +297,9 @@ export class QueryBuilder<T extends Record<string, any>> {
                     for (const [opKey, operand] of Object.entries(value)) {
                         const sqlOp = OPERATOR_MAP[opKey as WhereOperator];
                         if (!sqlOp) throw new Error(`Unsupported query operator: '${opKey}' on field '${key}'.`);
+                        if (opKey === '$between') {
+                            if (!Array.isArray(operand) || operand.length !== 2) throw new Error(`$between for '${key}' requires [min, max]`);
+                        }
                         this.iqo.wheres.push({
                             field: key,
                             operator: sqlOp as WhereCondition['operator'],
@@ -406,35 +432,31 @@ export class QueryBuilder<T extends Record<string, any>> {
 
     /** Execute the query and return the count of matching rows. */
     count(): number {
-        const params: any[] = [];
-        let sql = `SELECT COUNT(*) as count FROM ${this.tableName}`;
-
-        if (this.iqo.whereAST) {
-            const compiled = compileAST(this.iqo.whereAST);
-            sql += ` WHERE ${compiled.sql}`;
-            params.push(...compiled.params);
-        } else if (this.iqo.wheres.length > 0) {
-            const whereParts: string[] = [];
-            for (const w of this.iqo.wheres) {
-                if (w.operator === 'IN') {
-                    const arr = w.value as any[];
-                    if (arr.length === 0) {
-                        whereParts.push('1 = 0');
-                    } else {
-                        const placeholders = arr.map(() => '?').join(', ');
-                        whereParts.push(`${w.field} IN (${placeholders})`);
-                        params.push(...arr.map(transformValueForStorage));
-                    }
-                } else {
-                    whereParts.push(`${w.field} ${w.operator} ?`);
-                    params.push(transformValueForStorage(w.value));
-                }
-            }
-            sql += ` WHERE ${whereParts.join(' AND ')}`;
-        }
-
-        const results = this.executor(sql, params, true);
+        // Reuse compileIQO to avoid duplicating WHERE logic
+        const { sql: selectSql, params } = compileIQO(this.tableName, this.iqo);
+        // Replace "SELECT ... FROM" with "SELECT COUNT(*) as count FROM"
+        const countSql = selectSql.replace(/^SELECT .+? FROM/, 'SELECT COUNT(*) as count FROM');
+        const results = this.executor(countSql, params, true);
         return (results[0] as any)?.count ?? 0;
+    }
+
+    /** Alias for get() — returns the first matching row or null. */
+    first(): T | null {
+        return this.get();
+    }
+
+    /** Returns true if at least one row matches the query. */
+    exists(): boolean {
+        const { sql: selectSql, params } = compileIQO(this.tableName, this.iqo);
+        const existsSql = selectSql.replace(/^SELECT .+? FROM/, 'SELECT 1 FROM').replace(/ LIMIT \d+/, '') + ' LIMIT 1';
+        const results = this.executor(existsSql, params, true);
+        return results.length > 0;
+    }
+
+    /** Group results by one or more columns. */
+    groupBy(...fields: string[]): this {
+        this.iqo.groupBy.push(...fields);
+        return this;
     }
 
 

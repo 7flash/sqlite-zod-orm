@@ -151,6 +151,7 @@ export type NavEntityAccessor<
     Table extends string,
 > = {
     insert: (data: Omit<z.input<S[Table & keyof S]>, 'id'>) => NavEntity<S, R, Table>;
+    insertMany: (rows: Omit<z.input<S[Table & keyof S]>, 'id'>[]) => NavEntity<S, R, Table>[];
     update: ((id: number, data: Partial<Omit<z.input<S[Table & keyof S]>, 'id'>>) => NavEntity<S, R, Table> | null)
     & ((data: Partial<Omit<z.input<S[Table & keyof S]>, 'id'>>) => UpdateBuilder<NavEntity<S, R, Table>>);
     upsert: (conditions?: Partial<z.infer<S[Table & keyof S]>>, data?: Partial<z.infer<S[Table & keyof S]>>) => NavEntity<S, R, Table>;
@@ -181,6 +182,7 @@ export type ChangeEvent = 'insert' | 'update' | 'delete';
 
 export type EntityAccessor<S extends z.ZodType<any>> = {
     insert: (data: EntityData<S>) => AugmentedEntity<S>;
+    insertMany: (rows: EntityData<S>[]) => AugmentedEntity<S>[];
     update: ((id: number, data: Partial<EntityData<S>>) => AugmentedEntity<S> | null) & ((data: Partial<EntityData<S>>) => UpdateBuilder<AugmentedEntity<S>>);
     upsert: (conditions?: Partial<InferSchema<S>>, data?: Partial<InferSchema<S>>) => AugmentedEntity<S>;
     delete: (id: number) => void;

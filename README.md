@@ -308,7 +308,7 @@ const result = db.transaction(() => {
 ```bash
 bun examples/messages-demo.ts  # on() change listener demo
 bun examples/example.ts        # comprehensive demo
-bun test                        # 100 tests
+bun test                        # 117 tests
 ```
 
 ---

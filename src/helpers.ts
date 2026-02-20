@@ -35,7 +35,7 @@ export function buildWhereClause(conditions: Record<string, any>, tablePrefix?: 
             continue;
         }
         const value = conditions[key];
-        const fieldName = tablePrefix ? `${tablePrefix}.${key}` : key;
+        const fieldName = tablePrefix ? `"${tablePrefix}"."${key}"` : `"${key}"`;
 
         if (typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Date)) {
             const operator = Object.keys(value)[0];
@@ -49,6 +49,27 @@ export function buildWhereClause(conditions: Record<string, any>, tablePrefix?: 
                 if (operand.length === 0) { parts.push('1 = 0'); continue; }
                 parts.push(`${fieldName} IN (${operand.map(() => '?').join(', ')})`);
                 values.push(...operand.map((v: any) => transformForStorage({ v }).v));
+                continue;
+            }
+
+            if (operator === '$notIn') {
+                if (!Array.isArray(operand)) throw new Error(`$notIn for '${key}' requires an array`);
+                if (operand.length === 0) continue; // no-op: everything is "not in" an empty set
+                parts.push(`${fieldName} NOT IN (${operand.map(() => '?').join(', ')})`);
+                values.push(...operand.map((v: any) => transformForStorage({ v }).v));
+                continue;
+            }
+
+            if (operator === '$like') {
+                parts.push(`${fieldName} LIKE ?`);
+                values.push(operand);
+                continue;
+            }
+
+            if (operator === '$between') {
+                if (!Array.isArray(operand) || operand.length !== 2) throw new Error(`$between for '${key}' requires [min, max]`);
+                parts.push(`${fieldName} BETWEEN ? AND ?`);
+                values.push(transformForStorage({ v: operand[0] }).v, transformForStorage({ v: operand[1] }).v);
                 continue;
             }
 
