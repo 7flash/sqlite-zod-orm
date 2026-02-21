@@ -613,7 +613,32 @@ Additive — does NOT truncate. Perfect for test fixtures.
 
 ---
 
-## 26. Schema Validation
+## 26. Schema Diffing
+
+```typescript
+const d = db.diff();
+// { users: { added: ['bio'], removed: [], typeChanged: [] } }
+```
+Compares Zod schemas against live SQLite tables. Reports added, removed, and type-changed columns.
+
+---
+
+## 27. whereIn / whereNotIn
+
+```typescript
+// Array of values
+db.users.select().whereIn('name', ['Alice', 'Bob']).all()
+db.users.select().whereNotIn('id', [1, 2]).all()
+
+// Subquery — users who have orders
+const sub = db.orders.select('userId');
+db.users.select().whereIn('id', sub).all()
+```
+Subqueries compile the inner QueryBuilder IQO and nest as `WHERE col IN (SELECT ...)`.
+
+---
+
+## 28. Schema Validation
 
 Zod validates every insert and update:
 ```typescript
@@ -630,7 +655,7 @@ user.score; // → 0 (from z.number().int().default(0))
 
 ---
 
-## 27. Common Patterns
+## 29. Common Patterns
 
 ### Chat/message storage
 ```typescript
@@ -750,7 +775,7 @@ src/
 
 ### Tests
 ```bash
-bun test                               # 210 tests, ~1.2s
+bun test                               # 218 tests, ~1.4s
 bun test test/crud.test.ts             # just CRUD
 bun test test/fluent.test.ts           # query builder
 bun test test/relations.test.ts        # relationships

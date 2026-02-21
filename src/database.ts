@@ -473,6 +473,56 @@ class _Database<Schemas extends SchemaMap> {
     public seed(fixtures: Record<string, Record<string, any>[]>): void {
         this.load(fixtures, { append: true });
     }
+
+    // =========================================================================
+    // Schema Diffing
+    // =========================================================================
+
+    /**
+     * Compare Zod schemas against the live SQLite table structure.
+     * Returns a diff object per table: { added, removed, typeChanged }.
+     */
+    public diff(): Record<string, { added: string[]; removed: string[]; typeChanged: { column: string; expected: string; actual: string }[] }> {
+        const result: Record<string, { added: string[]; removed: string[]; typeChanged: { column: string; expected: string; actual: string }[] }> = {};
+        const systemCols = new Set(['id', 'createdAt', 'updatedAt', 'deletedAt']);
+
+        for (const [tableName, schema] of Object.entries(this.schemas)) {
+            const schemaFields = getStorableFields(schema);
+            const schemaColMap = new Map(schemaFields.map(f => [f.name, zodTypeToSqlType(f.type)]));
+
+            const liveColumns = this.columns(tableName);
+            const liveColMap = new Map(liveColumns.map(c => [c.name, c.type]));
+
+            const added: string[] = [];
+            const removed: string[] = [];
+            const typeChanged: { column: string; expected: string; actual: string }[] = [];
+
+            // Columns in schema but not in live DB
+            for (const [col, expectedType] of schemaColMap) {
+                if (!liveColMap.has(col)) {
+                    added.push(col);
+                } else {
+                    const actualType = liveColMap.get(col)!;
+                    if (actualType !== expectedType) {
+                        typeChanged.push({ column: col, expected: expectedType, actual: actualType });
+                    }
+                }
+            }
+
+            // Columns in live DB but not in schema (excluding system columns)
+            for (const col of liveColMap.keys()) {
+                if (!systemCols.has(col) && !schemaColMap.has(col)) {
+                    removed.push(col);
+                }
+            }
+
+            if (added.length > 0 || removed.length > 0 || typeChanged.length > 0) {
+                result[tableName] = { added, removed, typeChanged };
+            }
+        }
+
+        return result;
+    }
 }
 
 // =============================================================================

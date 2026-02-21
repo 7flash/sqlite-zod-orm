@@ -232,6 +232,39 @@ export class QueryBuilder<T extends Record<string, any>, TResult extends Record<
     }
 
     /**
+     * Filter by column value being in a list or subquery.
+     * ```ts
+     * db.users.select().whereIn('id', [1, 2, 3]).all()
+     * db.users.select().whereIn('id', db.orders.select('userId')).all()
+     * ```
+     */
+    whereIn(column: keyof T & string, values: any[] | QueryBuilder<any, any>): this {
+        if (Array.isArray(values)) {
+            const placeholders = values.map(() => '?').join(', ');
+            this.iqo.rawWheres.push({ sql: `"${column}" IN (${placeholders})`, params: values });
+        } else {
+            // Subquery: compile the inner QueryBuilder's IQO
+            const inner = compileIQO((values as any).tableName, (values as any).iqo);
+            this.iqo.rawWheres.push({ sql: `"${column}" IN (${inner.sql})`, params: inner.params });
+        }
+        return this;
+    }
+
+    /**
+     * Filter by column value NOT being in a list or subquery.
+     */
+    whereNotIn(column: keyof T & string, values: any[] | QueryBuilder<any, any>): this {
+        if (Array.isArray(values)) {
+            const placeholders = values.map(() => '?').join(', ');
+            this.iqo.rawWheres.push({ sql: `"${column}" NOT IN (${placeholders})`, params: values });
+        } else {
+            const inner = compileIQO((values as any).tableName, (values as any).iqo);
+            this.iqo.rawWheres.push({ sql: `"${column}" NOT IN (${inner.sql})`, params: inner.params });
+        }
+        return this;
+    }
+
+    /**
      * Eagerly load a related entity and attach as an array property.
      *
      * Runs a single batched query (WHERE fk IN (...)) per relation,

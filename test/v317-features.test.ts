@@ -23,8 +23,8 @@ describe('dump', () => {
 
         const data = db.dump();
         expect(data.users).toHaveLength(2);
-        expect(data.users[0].name).toBe('Alice');
-        expect(data.users[1].name).toBe('Bob');
+        expect(data.users![0].name).toBe('Alice');
+        expect(data.users![1].name).toBe('Bob');
         db.close();
     });
 
@@ -93,9 +93,9 @@ describe('load', () => {
         db2.load(data);
         expect(db2.users.count()).toBe(2);
         const users = db2.users.select().orderBy('name').all();
-        expect(users[0].name).toBe('Alice');
-        expect(users[0].score).toBe(100);
-        expect(users[1].name).toBe('Bob');
+        expect(users[0]!.name).toBe('Alice');
+        expect(users[0]!.score).toBe(100);
+        expect(users[1]!.name).toBe('Bob');
         db2.close();
     });
 
