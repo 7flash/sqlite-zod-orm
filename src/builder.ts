@@ -330,6 +330,19 @@ export class QueryBuilder<T extends Record<string, any>, TResult extends Record<
         return this.get();
     }
 
+    /**
+     * Return the first matching row or throw if none found.
+     * ```ts
+     * const user = db.users.select().where({ id: 1 }).firstOrFail();
+     * // throws Error('No matching row found') if id=1 doesn't exist
+     * ```
+     */
+    firstOrFail(): TResult {
+        const row = this.get();
+        if (row === null) throw new Error('No matching row found');
+        return row;
+    }
+
     /** Returns true if at least one row matches the query. */
     exists(): boolean {
         const { sql: selectSql, params } = compileIQO(this.tableName, this.iqo);
@@ -463,6 +476,19 @@ export class QueryBuilder<T extends Record<string, any>, TResult extends Record<
             `SELECT ${groupCols}, COUNT(*) as count FROM`
         );
         return this.executor(aggSql, params, true) as any;
+    }
+
+    // ---------- Query Inspection ----------
+
+    /**
+     * Compile and return the SQL string + params without executing.
+     * ```ts
+     * db.users.select().where({ role: 'admin' }).toSQL()
+     * // → { sql: 'SELECT * FROM "users" WHERE "role" = ?', params: ['admin'] }
+     * ```
+     */
+    toSQL(): { sql: string; params: any[] } {
+        return compileIQO(this.tableName, this.iqo);
     }
 
     // ---------- Convenience Methods ----------

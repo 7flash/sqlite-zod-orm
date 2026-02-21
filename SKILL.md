@@ -704,7 +704,26 @@ Forks a query builder so both branches operate independently.
 
 ---
 
-## 34. Schema Validation
+## 34. toSQL
+
+```typescript
+db.users.select().where({ role: 'admin' }).toSQL()
+// → { sql: 'SELECT ... WHERE ...', params: ['admin'] }
+```
+Compiles and returns the SQL query + params without executing. Great for debugging.
+
+---
+
+## 35. firstOrFail
+
+```typescript
+const user = db.users.select().where({ id: 1 }).firstOrFail();
+// throws Error('No matching row found') if nothing matches
+```
+
+---
+
+## 36. Schema Validation
 
 Zod validates every insert and update:
 ```typescript
@@ -721,7 +740,7 @@ user.score; // → 0 (from z.number().int().default(0))
 
 ---
 
-## 35. Common Patterns
+## 37. Common Patterns
 
 ### Chat/message storage
 ```typescript
@@ -841,7 +860,7 @@ src/
 
 ### Tests
 ```bash
-bun test                               # 238 tests, ~2s
+bun test                               # 243 tests, ~2s
 bun test test/crud.test.ts             # just CRUD
 bun test test/fluent.test.ts           # query builder
 bun test test/relations.test.ts        # relationships
