@@ -76,6 +76,12 @@ export type DatabaseOptions<R extends RelationsConfig = RelationsConfig> = {
      */
     debug?: boolean;
     /**
+     * Enable WAL (Write-Ahead Logging) journal mode for better
+     * concurrent read/write performance. Recommended for production.
+     * Default: `false`.
+     */
+    wal?: boolean;
+    /**
      * Lifecycle hooks per table. Each hook receives data and can transform it.
      *
      * - `beforeInsert(data)` — called before insert, return modified data or void

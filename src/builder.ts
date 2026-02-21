@@ -465,6 +465,36 @@ export class QueryBuilder<T extends Record<string, any>, TResult extends Record<
         return this.executor(aggSql, params, true) as any;
     }
 
+    // ---------- Convenience Methods ----------
+
+    /**
+     * Return a flat array of values for a single column.
+     * ```ts
+     * db.users.select().pluck('name') // → ['Alice', 'Bob', 'Charlie']
+     * ```
+     */
+    pluck(column: keyof T & string): any[] {
+        const { sql: selectSql, params } = compileIQO(this.tableName, this.iqo);
+        const pluckSql = selectSql.replace(/^SELECT .+? FROM/, `SELECT "${column}" FROM`);
+        const results = this.executor(pluckSql, params, true);
+        return results.map((r: any) => r[column]);
+    }
+
+    /** Clone this QueryBuilder so you can fork a query. */
+    clone(): QueryBuilder<T, TResult> {
+        const cloned = new QueryBuilder<T, TResult>(
+            this.tableName,
+            this.executor,
+            this.singleExecutor,
+            this.joinResolver,
+            this.conditionResolver,
+            this.eagerLoader,
+        );
+        // Deep-copy the IQO state
+        (cloned as any).iqo = JSON.parse(JSON.stringify(this.iqo));
+        return cloned;
+    }
+
     // ---------- Batch Mutations ----------
 
     /**

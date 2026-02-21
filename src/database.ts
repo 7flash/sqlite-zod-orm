@@ -65,7 +65,7 @@ class _Database<Schemas extends SchemaMap> {
 
     constructor(dbFile: string, schemas: Schemas, options: DatabaseOptions = {}) {
         this.db = new SqliteDatabase(dbFile);
-        this.db.run('PRAGMA journal_mode = WAL');
+        if (options.wal !== false) this.db.run('PRAGMA journal_mode = WAL');
         this.db.run('PRAGMA foreign_keys = ON');
         this.schemas = schemas;
         this.options = options;

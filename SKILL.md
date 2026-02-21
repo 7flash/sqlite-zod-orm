@@ -673,7 +673,38 @@ const count = db.transaction(() => {
 
 ---
 
-## 31. Schema Validation
+## 31. WAL Mode
+
+WAL (Write-Ahead Logging) is enabled by default for better concurrent read/write performance.
+```typescript
+new Database('app.db', schemas);                // WAL on (default)
+new Database('app.db', schemas, { wal: false }); // WAL off
+```
+
+---
+
+## 32. pluck
+
+```typescript
+db.users.select().pluck('name')  // → ['Alice', 'Bob', 'Charlie']
+db.users.select().where({ role: 'admin' }).pluck('email')
+```
+Flat array of values for a single column.
+
+---
+
+## 33. clone
+
+```typescript
+const base = db.users.select().where({ active: true });
+const admins = base.clone().where({ role: 'admin' });
+const guests = base.clone().where({ role: 'guest' });
+```
+Forks a query builder so both branches operate independently.
+
+---
+
+## 34. Schema Validation
 
 Zod validates every insert and update:
 ```typescript
@@ -690,7 +721,7 @@ user.score; // → 0 (from z.number().int().default(0))
 
 ---
 
-## 32. Common Patterns
+## 35. Common Patterns
 
 ### Chat/message storage
 ```typescript
@@ -810,7 +841,7 @@ src/
 
 ### Tests
 ```bash
-bun test                               # 229 tests, ~2s
+bun test                               # 238 tests, ~2s
 bun test test/crud.test.ts             # just CRUD
 bun test test/fluent.test.ts           # query builder
 bun test test/relations.test.ts        # relationships
