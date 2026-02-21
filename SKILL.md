@@ -576,7 +576,44 @@ With `softDeletes: true`, children are soft-deleted too.
 
 ---
 
-## 23. Schema Validation
+## 23. Data Export (dump)
+
+```typescript
+const data = db.dump();
+// { users: [{ id: 1, name: 'Alice', ... }, ...], posts: [...] }
+fs.writeFileSync('backup.json', JSON.stringify(data));
+```
+
+---
+
+## 24. Data Import (load)
+
+```typescript
+const backup = JSON.parse(fs.readFileSync('backup.json', 'utf-8'));
+db.load(backup);                   // truncates existing data first
+db.load(backup, { append: true }); // inserts without truncating
+```
+
+---
+
+## 25. Seed Fixtures
+
+```typescript
+db.seed({
+    users: [
+        { name: 'Alice', email: 'a@co.com' },
+        { name: 'Bob', email: 'b@co.com' },
+    ],
+    posts: [
+        { title: 'Hello', body: '...' },
+    ],
+});
+```
+Additive — does NOT truncate. Perfect for test fixtures.
+
+---
+
+## 26. Schema Validation
 
 Zod validates every insert and update:
 ```typescript
@@ -593,7 +630,7 @@ user.score; // → 0 (from z.number().int().default(0))
 
 ---
 
-## 24. Common Patterns
+## 27. Common Patterns
 
 ### Chat/message storage
 ```typescript
@@ -713,7 +750,7 @@ src/
 
 ### Tests
 ```bash
-bun test                               # 201 tests, ~1.4s
+bun test                               # 210 tests, ~1.2s
 bun test test/crud.test.ts             # just CRUD
 bun test test/fluent.test.ts           # query builder
 bun test test/relations.test.ts        # relationships

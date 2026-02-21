@@ -420,6 +420,59 @@ class _Database<Schemas extends SchemaMap> {
     public columns(tableName: string): { name: string; type: string; notnull: number; pk: number }[] {
         return this.db.query(`PRAGMA table_info("${tableName}")`).all() as any[];
     }
+
+    // =========================================================================
+    // Data Import / Export
+    // =========================================================================
+
+    /**
+     * Export all data as a JSON-serializable object.
+     * Each key is a table name, value is an array of raw row objects.
+     */
+    public dump(): Record<string, any[]> {
+        const result: Record<string, any[]> = {};
+        for (const tableName of Object.keys(this.schemas)) {
+            result[tableName] = this.db.query(`SELECT * FROM "${tableName}"`).all();
+        }
+        return result;
+    }
+
+    /**
+     * Import data from a dump object. Truncates existing data first.
+     * Use `{ append: true }` to insert without truncating.
+     */
+    public load(data: Record<string, any[]>, options?: { append?: boolean }): void {
+        const txn = this.db.transaction(() => {
+            for (const [tableName, rows] of Object.entries(data)) {
+                if (!this.schemas[tableName]) continue;
+                if (!options?.append) {
+                    this.db.run(`DELETE FROM "${tableName}"`);
+                }
+                for (const row of rows) {
+                    const cols = Object.keys(row).filter(k => k !== 'id');
+                    const placeholders = cols.map(() => '?').join(', ');
+                    const values = cols.map(c => {
+                        const v = row[c];
+                        // Auto-serialize objects/arrays
+                        if (v !== null && v !== undefined && typeof v === 'object' && !(v instanceof Buffer)) {
+                            return JSON.stringify(v);
+                        }
+                        return v;
+                    });
+                    this.db.query(`INSERT INTO "${tableName}" (${cols.map(c => `"${c}"`).join(', ')}) VALUES (${placeholders})`).run(...values);
+                }
+            }
+        });
+        txn();
+    }
+
+    /**
+     * Seed tables with fixture data. Each key is a table name, value is an
+     * array of records to insert. Does NOT truncate — use for additive seeding.
+     */
+    public seed(fixtures: Record<string, Record<string, any>[]>): void {
+        this.load(fixtures, { append: true });
+    }
 }
 
 // =============================================================================
