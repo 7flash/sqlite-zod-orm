@@ -40,4 +40,10 @@ export interface DatabaseContext {
 
     /** Cascade delete config — parent table → list of child tables to auto-delete. */
     cascade: Record<string, string[]>;
+
+    /**
+     * Conditional measurement helper — wraps fn with measure-fn when debug is on.
+     * When debug is off, executes fn directly with zero overhead.
+     */
+    _m<T>(label: string, fn: () => T): T;
 }

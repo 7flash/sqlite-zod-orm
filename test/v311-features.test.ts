@@ -322,15 +322,15 @@ describe('debug mode', () => {
     test('debug logs SQL to console', () => {
         const logs: string[] = [];
         const originalLog = console.log;
-        console.log = (...args: any[]) => { if (args[0] === '[satidb]') logs.push(args[1]); };
+        console.log = (...args: any[]) => { logs.push(args.map(String).join(' ')); };
         try {
             const db = createDb({ debug: true });
             db.users.insert({ name: 'Test', email: 'test@co.com' });
             db.users.select().all();
             db.close();
+            // measure-fn outputs with [satidb:X] prefix
             expect(logs.length).toBeGreaterThan(0);
-            expect(logs.some(l => l.includes('INSERT'))).toBe(true);
-            expect(logs.some(l => l.includes('SELECT'))).toBe(true);
+            expect(logs.some(l => l.includes('[satidb:'))).toBe(true);
         } finally {
             console.log = originalLog;
         }

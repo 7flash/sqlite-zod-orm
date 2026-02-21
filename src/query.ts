@@ -39,10 +39,11 @@ export function createQueryBuilder(ctx: DatabaseContext, entityName: string, ini
     const schema = ctx.schemas[entityName]!;
 
     const executor = (sql: string, params: any[], raw: boolean): any[] => {
-        if (ctx.debug) console.log('[satidb]', sql, params);
-        const rows = ctx.db.query(sql).all(...params);
-        if (raw) return rows;
-        return rows.map((row: any) => ctx.attachMethods(entityName, transformFromStorage(row, schema)));
+        return ctx._m(`SQL: ${sql.slice(0, 60)}`, () => {
+            const rows = ctx.db.query(sql).all(...params);
+            if (raw) return rows;
+            return rows.map((row: any) => ctx.attachMethods(entityName, transformFromStorage(row, schema)));
+        });
     };
 
     const singleExecutor = (sql: string, params: any[], raw: boolean): any | null => {

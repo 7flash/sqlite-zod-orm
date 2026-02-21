@@ -104,6 +104,7 @@ class _Database<Schemas extends SchemaMap> {
             hooks: options.hooks ?? {},
             computed: options.computed ?? {},
             cascade: options.cascade ?? {},
+            _m: <T>(label: string, fn: () => T): T => this._m(label, fn),
         };
 
         this._m('Init tables', () => this.initializeTables());
@@ -119,60 +120,62 @@ class _Database<Schemas extends SchemaMap> {
                 insert: (data) => this._m(`${entityName}.insert`, () => insert(this._ctx, entityName, data)),
                 insertMany: (rows: any[]) => this._m(`${entityName}.insertMany(${rows.length})`, () => insertMany(this._ctx, entityName, rows)),
                 update: (idOrData: any, data?: any) => {
-                    if (typeof idOrData === 'number') return update(this._ctx, entityName, idOrData, data);
+                    if (typeof idOrData === 'number') return this._m(`${entityName}.update(${idOrData})`, () => update(this._ctx, entityName, idOrData, data));
                     return createUpdateBuilder(this._ctx, entityName, idOrData);
                 },
-                upsert: (conditions, data) => upsert(this._ctx, entityName, data, conditions),
-                upsertMany: (rows: any[], conditions?: any) => upsertMany(this._ctx, entityName, rows, conditions),
-                findOrCreate: (conditions: any, defaults?: any) => findOrCreate(this._ctx, entityName, conditions, defaults),
+                upsert: (conditions, data) => this._m(`${entityName}.upsert`, () => upsert(this._ctx, entityName, data, conditions)),
+                upsertMany: (rows: any[], conditions?: any) => this._m(`${entityName}.upsertMany(${rows.length})`, () => upsertMany(this._ctx, entityName, rows, conditions)),
+                findOrCreate: (conditions: any, defaults?: any) => this._m(`${entityName}.findOrCreate`, () => findOrCreate(this._ctx, entityName, conditions, defaults)),
                 delete: ((id?: any) => {
                     if (typeof id === 'number') {
-                        // beforeDelete hook — return false to cancel
-                        const hooks = this._ctx.hooks[entityName];
-                        if (hooks?.beforeDelete) {
-                            const result = hooks.beforeDelete(id);
-                            if (result === false) return;
-                        }
+                        return this._m(`${entityName}.delete(${id})`, () => {
+                            // beforeDelete hook — return false to cancel
+                            const hooks = this._ctx.hooks[entityName];
+                            if (hooks?.beforeDelete) {
+                                const result = hooks.beforeDelete(id);
+                                if (result === false) return;
+                            }
 
-                        // Cascade delete children first
-                        const cascadeTargets = this._ctx.cascade[entityName];
-                        if (cascadeTargets) {
-                            for (const childTable of cascadeTargets) {
-                                // Find FK from child → this parent via relationships
-                                const rel = this._ctx.relationships.find(
-                                    r => r.type === 'belongs-to' && r.from === childTable && r.to === entityName
-                                );
-                                if (rel) {
-                                    if (this._softDeletes) {
-                                        const now = new Date().toISOString();
-                                        this.db.query(`UPDATE "${childTable}" SET "deletedAt" = ? WHERE "${rel.foreignKey}" = ?`).run(now, id);
-                                    } else {
-                                        this.db.query(`DELETE FROM "${childTable}" WHERE "${rel.foreignKey}" = ?`).run(id);
+                            // Cascade delete children first
+                            const cascadeTargets = this._ctx.cascade[entityName];
+                            if (cascadeTargets) {
+                                for (const childTable of cascadeTargets) {
+                                    const rel = this._ctx.relationships.find(
+                                        r => r.type === 'belongs-to' && r.from === childTable && r.to === entityName
+                                    );
+                                    if (rel) {
+                                        if (this._softDeletes) {
+                                            const now = new Date().toISOString();
+                                            this.db.query(`UPDATE "${childTable}" SET "deletedAt" = ? WHERE "${rel.foreignKey}" = ?`).run(now, id);
+                                        } else {
+                                            this.db.query(`DELETE FROM "${childTable}" WHERE "${rel.foreignKey}" = ?`).run(id);
+                                        }
                                     }
                                 }
                             }
-                        }
 
-                        if (this._softDeletes) {
-                            const now = new Date().toISOString();
-                            this.db.query(`UPDATE "${entityName}" SET "deletedAt" = ? WHERE id = ?`).run(now, id);
-                            if (hooks?.afterDelete) hooks.afterDelete(id);
-                            return;
-                        }
-                        return deleteEntity(this._ctx, entityName, id);
+                            if (this._softDeletes) {
+                                const now = new Date().toISOString();
+                                this.db.query(`UPDATE "${entityName}" SET "deletedAt" = ? WHERE id = ?`).run(now, id);
+                                if (hooks?.afterDelete) hooks.afterDelete(id);
+                                return;
+                            }
+                            return deleteEntity(this._ctx, entityName, id);
+                        });
                     }
                     return createDeleteBuilder(this._ctx, entityName);
                 }) as any,
                 restore: ((id: number) => {
                     if (!this._softDeletes) throw new Error('restore() requires softDeletes: true');
-                    // debug log replaced by measure-fn instrumentation
-                    this.db.query(`UPDATE "${entityName}" SET "deletedAt" = NULL WHERE id = ?`).run(id);
+                    this._m(`${entityName}.restore(${id})`, () => {
+                        this.db.query(`UPDATE "${entityName}" SET "deletedAt" = NULL WHERE id = ?`).run(id);
+                    });
                 }) as any,
                 select: (...cols: string[]) => createQueryBuilder(this._ctx, entityName, cols),
-                count: () => {
+                count: () => this._m(`${entityName}.count`, () => {
                     const row = this.db.query(`SELECT COUNT(*) as count FROM "${entityName}"${this._softDeletes ? ' WHERE "deletedAt" IS NULL' : ''}`).get() as any;
                     return row?.count ?? 0;
-                },
+                }),
                 on: (event: ChangeEvent, callback: (row: any) => void | Promise<void>) => {
                     return this._registerListener(entityName, event, callback);
                 },
@@ -379,7 +382,7 @@ class _Database<Schemas extends SchemaMap> {
     // =========================================================================
 
     public transaction<T>(callback: () => T): T {
-        return this.db.transaction(callback)();
+        return this._m('transaction', () => this.db.transaction(callback)());
     }
 
     /** Close the database: stops polling and releases the SQLite handle. */
@@ -396,14 +399,13 @@ class _Database<Schemas extends SchemaMap> {
     public query<T extends Record<string, any> = Record<string, any>>(
         callback: (ctx: { [K in keyof Schemas]: ProxyColumns<InferSchema<Schemas[K]>> }) => ProxyQueryResult
     ): T[] {
-        return executeProxyQuery(
+        return this._m('query(proxy)', () => executeProxyQuery(
             this.schemas,
             callback as any,
             (sql: string, params: any[]) => {
-                if (this._debug) console.log('[satidb]', sql, params);
                 return this.db.query(sql).all(...params) as T[];
             },
-        );
+        ));
     }
 
     // =========================================================================
@@ -412,14 +414,12 @@ class _Database<Schemas extends SchemaMap> {
 
     /** Execute a raw SQL query and return results. */
     public raw<T = any>(sql: string, ...params: any[]): T[] {
-        if (this._debug) console.log('[satidb]', sql, params);
-        return this.db.query(sql).all(...params) as T[];
+        return this._m(`raw: ${sql.slice(0, 60)}`, () => this.db.query(sql).all(...params) as T[]);
     }
 
     /** Execute a raw SQL statement (INSERT/UPDATE/DELETE) without returning rows. */
     public exec(sql: string, ...params: any[]): void {
-        if (this._debug) console.log('[satidb]', sql, params);
-        this.db.run(sql, ...params);
+        this._m(`exec: ${sql.slice(0, 60)}`, () => this.db.run(sql, ...params));
     }
 
     // =========================================================================
@@ -445,11 +445,13 @@ class _Database<Schemas extends SchemaMap> {
      * Each key is a table name, value is an array of raw row objects.
      */
     public dump(): Record<string, any[]> {
-        const result: Record<string, any[]> = {};
-        for (const tableName of Object.keys(this.schemas)) {
-            result[tableName] = this.db.query(`SELECT * FROM "${tableName}"`).all();
-        }
-        return result;
+        return this._m('dump', () => {
+            const result: Record<string, any[]> = {};
+            for (const tableName of Object.keys(this.schemas)) {
+                result[tableName] = this.db.query(`SELECT * FROM "${tableName}"`).all();
+            }
+            return result;
+        });
     }
 
     /**
@@ -457,28 +459,29 @@ class _Database<Schemas extends SchemaMap> {
      * Use `{ append: true }` to insert without truncating.
      */
     public load(data: Record<string, any[]>, options?: { append?: boolean }): void {
-        const txn = this.db.transaction(() => {
-            for (const [tableName, rows] of Object.entries(data)) {
-                if (!this.schemas[tableName]) continue;
-                if (!options?.append) {
-                    this.db.run(`DELETE FROM "${tableName}"`);
+        this._m(`load(${Object.keys(data).join(',')})`, () => {
+            const txn = this.db.transaction(() => {
+                for (const [tableName, rows] of Object.entries(data)) {
+                    if (!this.schemas[tableName]) continue;
+                    if (!options?.append) {
+                        this.db.run(`DELETE FROM "${tableName}"`);
+                    }
+                    for (const row of rows) {
+                        const cols = Object.keys(row).filter(k => k !== 'id');
+                        const placeholders = cols.map(() => '?').join(', ');
+                        const values = cols.map(c => {
+                            const v = row[c];
+                            if (v !== null && v !== undefined && typeof v === 'object' && !(v instanceof Buffer)) {
+                                return JSON.stringify(v);
+                            }
+                            return v;
+                        });
+                        this.db.query(`INSERT INTO "${tableName}" (${cols.map(c => `"${c}"`).join(', ')}) VALUES (${placeholders})`).run(...values);
+                    }
                 }
-                for (const row of rows) {
-                    const cols = Object.keys(row).filter(k => k !== 'id');
-                    const placeholders = cols.map(() => '?').join(', ');
-                    const values = cols.map(c => {
-                        const v = row[c];
-                        // Auto-serialize objects/arrays
-                        if (v !== null && v !== undefined && typeof v === 'object' && !(v instanceof Buffer)) {
-                            return JSON.stringify(v);
-                        }
-                        return v;
-                    });
-                    this.db.query(`INSERT INTO "${tableName}" (${cols.map(c => `"${c}"`).join(', ')}) VALUES (${placeholders})`).run(...values);
-                }
-            }
+            });
+            txn();
         });
-        txn();
     }
 
     /**
@@ -498,45 +501,45 @@ class _Database<Schemas extends SchemaMap> {
      * Returns a diff object per table: { added, removed, typeChanged }.
      */
     public diff(): Record<string, { added: string[]; removed: string[]; typeChanged: { column: string; expected: string; actual: string }[] }> {
-        const result: Record<string, { added: string[]; removed: string[]; typeChanged: { column: string; expected: string; actual: string }[] }> = {};
-        const systemCols = new Set(['id', 'createdAt', 'updatedAt', 'deletedAt']);
+        return this._m('diff', () => {
+            const result: Record<string, { added: string[]; removed: string[]; typeChanged: { column: string; expected: string; actual: string }[] }> = {};
+            const systemCols = new Set(['id', 'createdAt', 'updatedAt', 'deletedAt']);
 
-        for (const [tableName, schema] of Object.entries(this.schemas)) {
-            const schemaFields = getStorableFields(schema);
-            const schemaColMap = new Map(schemaFields.map(f => [f.name, zodTypeToSqlType(f.type)]));
+            for (const [tableName, schema] of Object.entries(this.schemas)) {
+                const schemaFields = getStorableFields(schema);
+                const schemaColMap = new Map(schemaFields.map(f => [f.name, zodTypeToSqlType(f.type)]));
 
-            const liveColumns = this.columns(tableName);
-            const liveColMap = new Map(liveColumns.map(c => [c.name, c.type]));
+                const liveColumns = this.columns(tableName);
+                const liveColMap = new Map(liveColumns.map(c => [c.name, c.type]));
 
-            const added: string[] = [];
-            const removed: string[] = [];
-            const typeChanged: { column: string; expected: string; actual: string }[] = [];
+                const added: string[] = [];
+                const removed: string[] = [];
+                const typeChanged: { column: string; expected: string; actual: string }[] = [];
 
-            // Columns in schema but not in live DB
-            for (const [col, expectedType] of schemaColMap) {
-                if (!liveColMap.has(col)) {
-                    added.push(col);
-                } else {
-                    const actualType = liveColMap.get(col)!;
-                    if (actualType !== expectedType) {
-                        typeChanged.push({ column: col, expected: expectedType, actual: actualType });
+                for (const [col, expectedType] of schemaColMap) {
+                    if (!liveColMap.has(col)) {
+                        added.push(col);
+                    } else {
+                        const actualType = liveColMap.get(col)!;
+                        if (actualType !== expectedType) {
+                            typeChanged.push({ column: col, expected: expectedType, actual: actualType });
+                        }
                     }
                 }
-            }
 
-            // Columns in live DB but not in schema (excluding system columns)
-            for (const col of liveColMap.keys()) {
-                if (!systemCols.has(col) && !schemaColMap.has(col)) {
-                    removed.push(col);
+                for (const col of liveColMap.keys()) {
+                    if (!systemCols.has(col) && !schemaColMap.has(col)) {
+                        removed.push(col);
+                    }
+                }
+
+                if (added.length > 0 || removed.length > 0 || typeChanged.length > 0) {
+                    result[tableName] = { added, removed, typeChanged };
                 }
             }
 
-            if (added.length > 0 || removed.length > 0 || typeChanged.length > 0) {
-                result[tableName] = { added, removed, typeChanged };
-            }
-        }
-
-        return result;
+            return result;
+        });
     }
 }
 

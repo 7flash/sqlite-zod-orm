@@ -66,9 +66,12 @@ export function insert<T extends Record<string, any>>(ctx: DatabaseContext, enti
         ? `INSERT INTO "${entityName}" DEFAULT VALUES`
         : `INSERT INTO "${entityName}" (${quotedCols.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`;
 
-    if (ctx.debug) console.log('[satidb]', sql, Object.values(transformed));
-    const result = ctx.db.query(sql).run(...Object.values(transformed));
-    const newEntity = getById(ctx, entityName, result.lastInsertRowid as number);
+    let lastId = 0;
+    ctx._m(`SQL: ${sql.slice(0, 40)}`, () => {
+        const result = ctx.db.query(sql).run(...Object.values(transformed));
+        lastId = result.lastInsertRowid as number;
+    });
+    const newEntity = getById(ctx, entityName, lastId);
     if (!newEntity) throw new Error('Failed to retrieve entity after insertion');
 
     // afterInsert hook
@@ -99,8 +102,9 @@ export function update<T extends Record<string, any>>(ctx: DatabaseContext, enti
 
     const setClause = Object.keys(transformed).map(key => `"${key}" = ?`).join(', ');
     const sql = `UPDATE "${entityName}" SET ${setClause} WHERE id = ?`;
-    if (ctx.debug) console.log('[satidb]', sql, [...Object.values(transformed), id]);
-    ctx.db.query(sql).run(...Object.values(transformed), id);
+    ctx._m(`SQL: UPDATE ${entityName} SET ...`, () => {
+        ctx.db.query(sql).run(...Object.values(transformed), id);
+    });
 
     const updated = getById(ctx, entityName, id);
 
@@ -192,14 +196,12 @@ export function deleteWhere(ctx: DatabaseContext, entityName: string, conditions
         // Soft delete: set deletedAt instead of removing rows
         const now = new Date().toISOString();
         const sql = `UPDATE "${entityName}" SET "deletedAt" = ? ${clause}`;
-        if (ctx.debug) console.log('[satidb]', sql, [now, ...values]);
-        const result = ctx.db.query(sql).run(now, ...values);
+        const result = ctx._m(`SQL: ${sql.slice(0, 50)}`, () => ctx.db.query(sql).run(now, ...values));
         return (result as any).changes ?? 0;
     }
 
     const sql = `DELETE FROM "${entityName}" ${clause}`;
-    if (ctx.debug) console.log('[satidb]', sql, values);
-    const result = ctx.db.query(sql).run(...values);
+    const result = ctx._m(`SQL: ${sql.slice(0, 50)}`, () => ctx.db.query(sql).run(...values));
     return (result as any).changes ?? 0;
 }
 
