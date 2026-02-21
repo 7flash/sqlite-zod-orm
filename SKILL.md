@@ -751,7 +751,22 @@ user.score; // → 0 (from z.number().int().default(0))
 
 ---
 
-## 38. Common Patterns
+## 38. measure-fn Instrumentation
+
+With `debug: true`, SatiDB uses [measure-fn](https://www.npmjs.com/package/measure-fn) for automatic timing of all operations:
+```typescript
+const db = new Database('app.db', schemas, { debug: true });
+// Output:
+// [satidb:a] ✓ Init tables 0.45ms
+// [satidb:b] ✓ Change tracking 1.20ms
+// [satidb:c] ✓ Run migrations 0.03ms
+// [satidb:d] ✓ users.insert 0.12ms → {"id":1,...}
+```
+Zero overhead when `debug` is off — functions execute directly without measurement.
+
+---
+
+## 39. Common Patterns
 
 ### Chat/message storage
 ```typescript

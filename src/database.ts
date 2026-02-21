@@ -6,6 +6,7 @@
  * focused modules.
  */
 import { Database as SqliteDatabase } from 'bun:sqlite';
+import { createMeasure } from 'measure-fn';
 import { z } from 'zod';
 import { QueryBuilder, executeProxyQuery, createQueryBuilder, type ProxyQueryResult } from './query';
 import type {
@@ -63,7 +64,22 @@ class _Database<Schemas extends SchemaMap> {
     /** Poll interval in ms. */
     private _pollInterval: number;
 
+    /** Scoped measure-fn instance for instrumentation. */
+    private _measure: ReturnType<typeof createMeasure>;
+
+    /**
+     * Conditional measurement helper — wraps with measure-fn only when debug is on.
+     * When debug is off, executes fn directly with zero overhead.
+     */
+    private _m<T>(label: string, fn: () => T): T {
+        if (this._debug) return this._measure.measureSync.assert(label, fn);
+        return fn();
+    }
+
     constructor(dbFile: string, schemas: Schemas, options: DatabaseOptions = {}) {
+        this._debug = options.debug === true;
+        this._measure = createMeasure('satidb');
+
         this.db = new SqliteDatabase(dbFile);
         if (options.wal !== false) this.db.run('PRAGMA journal_mode = WAL');
         this.db.run('PRAGMA foreign_keys = ON');
@@ -72,7 +88,6 @@ class _Database<Schemas extends SchemaMap> {
         this._reactive = options.reactive !== false; // default true
         this._timestamps = options.timestamps === true;
         this._softDeletes = options.softDeletes === true;
-        this._debug = options.debug === true;
         this._pollInterval = options.pollInterval ?? 100;
         this.relationships = options.relations ? parseRelationsConfig(options.relations, schemas) : [];
 
@@ -91,18 +106,18 @@ class _Database<Schemas extends SchemaMap> {
             cascade: options.cascade ?? {},
         };
 
-        this.initializeTables();
-        if (this._reactive) this.initializeChangeTracking();
-        this.runMigrations();
-        if (options.indexes) this.createIndexes(options.indexes);
-        if (options.unique) this.createUniqueConstraints(options.unique);
+        this._m('Init tables', () => this.initializeTables());
+        if (this._reactive) this._m('Change tracking', () => this.initializeChangeTracking());
+        this._m('Run migrations', () => this.runMigrations());
+        if (options.indexes) this._m('Create indexes', () => this.createIndexes(options.indexes!));
+        if (options.unique) this._m('Unique constraints', () => this.createUniqueConstraints(options.unique!));
 
         // Create typed entity accessors (db.users, db.posts, etc.)
         for (const entityName of Object.keys(schemas)) {
             const key = entityName as keyof Schemas;
             const accessor: EntityAccessor<Schemas[typeof key]> = {
-                insert: (data) => insert(this._ctx, entityName, data),
-                insertMany: (rows: any[]) => insertMany(this._ctx, entityName, rows),
+                insert: (data) => this._m(`${entityName}.insert`, () => insert(this._ctx, entityName, data)),
+                insertMany: (rows: any[]) => this._m(`${entityName}.insertMany(${rows.length})`, () => insertMany(this._ctx, entityName, rows)),
                 update: (idOrData: any, data?: any) => {
                     if (typeof idOrData === 'number') return update(this._ctx, entityName, idOrData, data);
                     return createUpdateBuilder(this._ctx, entityName, idOrData);
@@ -150,7 +165,7 @@ class _Database<Schemas extends SchemaMap> {
                 }) as any,
                 restore: ((id: number) => {
                     if (!this._softDeletes) throw new Error('restore() requires softDeletes: true');
-                    if (this._debug) console.log('[satidb]', `UPDATE "${entityName}" SET "deletedAt" = NULL WHERE id = ?`, [id]);
+                    // debug log replaced by measure-fn instrumentation
                     this.db.query(`UPDATE "${entityName}" SET "deletedAt" = NULL WHERE id = ?`).run(id);
                 }) as any,
                 select: (...cols: string[]) => createQueryBuilder(this._ctx, entityName, cols),
