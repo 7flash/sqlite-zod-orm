@@ -228,6 +228,21 @@ db.exec('UPDATE users SET score = 0 WHERE role = ?', 'guest');
 - Debug mode (SQL logging)
 - Raw SQL escape hatch
 
+## Contributing
+
+SatiDB is opinionated by design. Before proposing new features, understand what it intentionally does **not** do:
+
+| ❌ Don't add | Why |
+|---|---|
+| Tagged SQL templates | The whole point is "zero SQL" — `db.raw()` is the escape hatch |
+| FTS5 wrapper | Wrapping it poorly is worse than not wrapping it — use `db.raw()` |
+| Query middleware | `measure-fn` handles observability, `hooks` handle lifecycle |
+| Cursor pagination | Offset pagination covers SQLite's single-process use case |
+| Schema introspection API | Zod schemas are compile-time known — runtime reflection invites dynamic queries |
+| Migration CLI | Auto-migration handles additive changes; use `db.exec()` for destructive ones |
+
+**The rule:** if the query builder can already do it, don't add a new API surface for it.
+
 ## Requirements
 
 - **Bun** ≥ 1.0 (uses `bun:sqlite` native bindings)

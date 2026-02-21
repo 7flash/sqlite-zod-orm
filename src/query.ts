@@ -40,7 +40,7 @@ export function createQueryBuilder(ctx: DatabaseContext, entityName: string, ini
 
     const executor = (sql: string, params: any[], raw: boolean): any[] => {
         return ctx._m(`SQL: ${sql.slice(0, 60)}`, () => {
-            const rows = ctx.db.query(sql).all(...params);
+            const rows = ctx._stmt(sql).all(...params);
             if (raw) return rows;
             return rows.map((row: any) => ctx.attachMethods(entityName, transformFromStorage(row, schema)));
         });
@@ -103,7 +103,7 @@ export function createQueryBuilder(ctx: DatabaseContext, entityName: string, ini
             if (belongsTo) {
                 const fk = belongsTo.foreignKey;
                 const placeholders = parentIds.map(() => '?').join(', ');
-                const childRows = ctx.db.query(
+                const childRows = ctx._stmt(
                     `SELECT * FROM ${hasMany.to} WHERE ${fk} IN (${placeholders})`
                 ).all(...parentIds) as any[];
 

@@ -46,4 +46,10 @@ export interface DatabaseContext {
      * When debug is off, executes fn directly with zero overhead.
      */
     _m<T>(label: string, fn: () => T): T;
+
+    /**
+     * Get a cached prepared statement. Compiles SQL once, reuses on subsequent calls.
+     * Falls back to `db.query(sql)` if the statement was finalized.
+     */
+    _stmt(sql: string): ReturnType<SqliteDatabase['query']>;
 }

@@ -67,6 +67,19 @@ class _Database<Schemas extends SchemaMap> {
     /** Scoped measure-fn instance for instrumentation. */
     private _measure: ReturnType<typeof createMeasure>;
 
+    /** Prepared statement cache — avoids re-compiling identical SQL. */
+    private _stmtCache = new Map<string, ReturnType<SqliteDatabase['query']>>();
+
+    /** Get or create a cached prepared statement. */
+    private _stmt(sql: string): ReturnType<SqliteDatabase['query']> {
+        let stmt = this._stmtCache.get(sql);
+        if (!stmt) {
+            stmt = this.db.query(sql);
+            this._stmtCache.set(sql, stmt);
+        }
+        return stmt;
+    }
+
     /**
      * Conditional measurement helper — wraps with measure-fn only when debug is on.
      * When debug is off, executes fn directly with zero overhead.
@@ -105,6 +118,7 @@ class _Database<Schemas extends SchemaMap> {
             computed: options.computed ?? {},
             cascade: options.cascade ?? {},
             _m: <T>(label: string, fn: () => T): T => this._m(label, fn),
+            _stmt: (sql: string) => this._stmt(sql),
         };
 
         this._m('Init tables', () => this.initializeTables());
@@ -146,9 +160,9 @@ class _Database<Schemas extends SchemaMap> {
                                     if (rel) {
                                         if (this._softDeletes) {
                                             const now = new Date().toISOString();
-                                            this.db.query(`UPDATE "${childTable}" SET "deletedAt" = ? WHERE "${rel.foreignKey}" = ?`).run(now, id);
+                                            this._stmt(`UPDATE "${childTable}" SET "deletedAt" = ? WHERE "${rel.foreignKey}" = ?`).run(now, id);
                                         } else {
-                                            this.db.query(`DELETE FROM "${childTable}" WHERE "${rel.foreignKey}" = ?`).run(id);
+                                            this._stmt(`DELETE FROM "${childTable}" WHERE "${rel.foreignKey}" = ?`).run(id);
                                         }
                                     }
                                 }
@@ -156,7 +170,7 @@ class _Database<Schemas extends SchemaMap> {
 
                             if (this._softDeletes) {
                                 const now = new Date().toISOString();
-                                this.db.query(`UPDATE "${entityName}" SET "deletedAt" = ? WHERE id = ?`).run(now, id);
+                                this._stmt(`UPDATE "${entityName}" SET "deletedAt" = ? WHERE id = ?`).run(now, id);
                                 if (hooks?.afterDelete) hooks.afterDelete(id);
                                 return;
                             }
@@ -168,12 +182,12 @@ class _Database<Schemas extends SchemaMap> {
                 restore: ((id: number) => {
                     if (!this._softDeletes) throw new Error('restore() requires softDeletes: true');
                     this._m(`${entityName}.restore(${id})`, () => {
-                        this.db.query(`UPDATE "${entityName}" SET "deletedAt" = NULL WHERE id = ?`).run(id);
+                        this._stmt(`UPDATE "${entityName}" SET "deletedAt" = NULL WHERE id = ?`).run(id);
                     });
                 }) as any,
                 select: (...cols: string[]) => createQueryBuilder(this._ctx, entityName, cols),
                 count: () => this._m(`${entityName}.count`, () => {
-                    const row = this.db.query(`SELECT COUNT(*) as count FROM "${entityName}"${this._softDeletes ? ' WHERE "deletedAt" IS NULL' : ''}`).get() as any;
+                    const row = this._stmt(`SELECT COUNT(*) as count FROM "${entityName}"${this._softDeletes ? ' WHERE "deletedAt" IS NULL' : ''}`).get() as any;
                     return row?.count ?? 0;
                 }),
                 on: (event: ChangeEvent, callback: (row: any) => void | Promise<void>) => {
@@ -339,11 +353,11 @@ class _Database<Schemas extends SchemaMap> {
      */
     private _processChanges(): void {
         // Fast path: check if anything changed at all (single scalar, index-only)
-        const head = this.db.query('SELECT MAX(id) as m FROM "_changes"').get() as any;
+        const head = this._stmt('SELECT MAX(id) as m FROM "_changes"').get() as any;
         const maxId: number = head?.m ?? 0;
         if (maxId <= this._changeWatermark) return;
 
-        const changes = this.db.query(
+        const changes = this._stmt(
             'SELECT id, tbl, op, row_id FROM "_changes" WHERE id > ? ORDER BY id'
         ).all(this._changeWatermark) as { id: number; tbl: string; op: string; row_id: number }[];
 
@@ -374,7 +388,7 @@ class _Database<Schemas extends SchemaMap> {
         }
 
         // Clean up consumed changes
-        this.db.query('DELETE FROM "_changes" WHERE id <= ?').run(this._changeWatermark);
+        this._stmt('DELETE FROM "_changes" WHERE id <= ?').run(this._changeWatermark);
     }
 
     // =========================================================================
@@ -385,9 +399,10 @@ class _Database<Schemas extends SchemaMap> {
         return this._m('transaction', () => this.db.transaction(callback)());
     }
 
-    /** Close the database: stops polling and releases the SQLite handle. */
+    /** Close the database: stops polling, clears cache, and releases the SQLite handle. */
     public close(): void {
         this._stopPolling();
+        this._stmtCache.clear();
         this.db.close();
     }
 
@@ -403,7 +418,7 @@ class _Database<Schemas extends SchemaMap> {
             this.schemas,
             callback as any,
             (sql: string, params: any[]) => {
-                return this.db.query(sql).all(...params) as T[];
+                return this._stmt(sql).all(...params) as T[];
             },
         ));
     }
@@ -414,7 +429,7 @@ class _Database<Schemas extends SchemaMap> {
 
     /** Execute a raw SQL query and return results. */
     public raw<T = any>(sql: string, ...params: any[]): T[] {
-        return this._m(`raw: ${sql.slice(0, 60)}`, () => this.db.query(sql).all(...params) as T[]);
+        return this._m(`raw: ${sql.slice(0, 60)}`, () => this._stmt(sql).all(...params) as T[]);
     }
 
     /** Execute a raw SQL statement (INSERT/UPDATE/DELETE) without returning rows. */

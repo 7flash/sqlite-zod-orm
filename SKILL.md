@@ -766,7 +766,23 @@ Zero overhead when `debug` is off — functions execute directly without measure
 
 ---
 
-## 39. Common Patterns
+## 39. Prepared Statement Caching
+
+SatiDB automatically caches compiled SQL statements. Repeated operations with identical SQL patterns reuse the same prepared statement instead of re-parsing:
+```typescript
+// These all reuse cached statements internally:
+for (let i = 0; i < 1000; i++) {
+    db.users.insert({ name: `User ${i}`, email: `u${i}@co.com` });
+}
+db.users.select().where({ name: 'Alice' }).get(); // cached
+db.users.count();                                  // cached
+db.raw('SELECT * FROM "users" WHERE name = ?', 'Bob'); // cached
+```
+No configuration needed — caching is always on. The cache is per-database instance and cleared on `close()`.
+
+---
+
+## 40. Common Patterns
 
 ### Chat/message storage
 ```typescript
@@ -907,3 +923,5 @@ bun bench/triggers-vs-naive.ts         # change detection strategies
 bun bench/poll-strategy.ts             # MAX(id) optimization
 bun bench/indexes.ts                   # index impact on queries
 ```
+
+

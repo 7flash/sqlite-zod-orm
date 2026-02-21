@@ -14,21 +14,21 @@ import type { DatabaseContext } from './context';
 // ---------------------------------------------------------------------------
 
 export function getById(ctx: DatabaseContext, entityName: string, id: number): AugmentedEntity<any> | null {
-    const row = ctx.db.query(`SELECT * FROM "${entityName}" WHERE id = ?`).get(id) as any;
+    const row = ctx._stmt(`SELECT * FROM "${entityName}" WHERE id = ?`).get(id) as any;
     if (!row) return null;
     return ctx.attachMethods(entityName, transformFromStorage(row, ctx.schemas[entityName]!));
 }
 
 export function getOne(ctx: DatabaseContext, entityName: string, conditions: Record<string, any>): AugmentedEntity<any> | null {
     const { clause, values } = ctx.buildWhereClause(conditions);
-    const row = ctx.db.query(`SELECT * FROM "${entityName}" ${clause} LIMIT 1`).get(...values) as any;
+    const row = ctx._stmt(`SELECT * FROM "${entityName}" ${clause} LIMIT 1`).get(...values) as any;
     if (!row) return null;
     return ctx.attachMethods(entityName, transformFromStorage(row, ctx.schemas[entityName]!));
 }
 
 export function findMany(ctx: DatabaseContext, entityName: string, conditions: Record<string, any> = {}): AugmentedEntity<any>[] {
     const { clause, values } = ctx.buildWhereClause(conditions);
-    const rows = ctx.db.query(`SELECT * FROM "${entityName}" ${clause}`).all(...values);
+    const rows = ctx._stmt(`SELECT * FROM "${entityName}" ${clause}`).all(...values);
     return rows.map((row: any) =>
         ctx.attachMethods(entityName, transformFromStorage(row, ctx.schemas[entityName]!))
     );
@@ -68,7 +68,7 @@ export function insert<T extends Record<string, any>>(ctx: DatabaseContext, enti
 
     let lastId = 0;
     ctx._m(`SQL: ${sql.slice(0, 40)}`, () => {
-        const result = ctx.db.query(sql).run(...Object.values(transformed));
+        const result = ctx._stmt(sql).run(...Object.values(transformed));
         lastId = result.lastInsertRowid as number;
     });
     const newEntity = getById(ctx, entityName, lastId);
@@ -103,7 +103,7 @@ export function update<T extends Record<string, any>>(ctx: DatabaseContext, enti
     const setClause = Object.keys(transformed).map(key => `"${key}" = ?`).join(', ');
     const sql = `UPDATE "${entityName}" SET ${setClause} WHERE id = ?`;
     ctx._m(`SQL: UPDATE ${entityName} SET ...`, () => {
-        ctx.db.query(sql).run(...Object.values(transformed), id);
+        ctx._stmt(sql).run(...Object.values(transformed), id);
     });
 
     const updated = getById(ctx, entityName, id);
@@ -125,7 +125,7 @@ export function updateWhere(ctx: DatabaseContext, entityName: string, data: Reco
 
     const setCols = Object.keys(transformed);
     const setClause = setCols.map(key => `"${key}" = ?`).join(', ');
-    const result = ctx.db.query(`UPDATE "${entityName}" SET ${setClause} ${clause}`).run(
+    const result = ctx._stmt(`UPDATE "${entityName}" SET ${setClause} ${clause}`).run(
         ...setCols.map(key => transformed[key]),
         ...whereValues
     );
@@ -181,7 +181,7 @@ export function deleteEntity(ctx: DatabaseContext, entityName: string, id: numbe
         if (result === false) return;
     }
 
-    ctx.db.query(`DELETE FROM "${entityName}" WHERE id = ?`).run(id);
+    ctx._stmt(`DELETE FROM "${entityName}" WHERE id = ?`).run(id);
 
     // afterDelete hook
     if (hooks?.afterDelete) hooks.afterDelete(id);
@@ -196,12 +196,12 @@ export function deleteWhere(ctx: DatabaseContext, entityName: string, conditions
         // Soft delete: set deletedAt instead of removing rows
         const now = new Date().toISOString();
         const sql = `UPDATE "${entityName}" SET "deletedAt" = ? ${clause}`;
-        const result = ctx._m(`SQL: ${sql.slice(0, 50)}`, () => ctx.db.query(sql).run(now, ...values));
+        const result = ctx._m(`SQL: ${sql.slice(0, 50)}`, () => ctx._stmt(sql).run(now, ...values));
         return (result as any).changes ?? 0;
     }
 
     const sql = `DELETE FROM "${entityName}" ${clause}`;
-    const result = ctx._m(`SQL: ${sql.slice(0, 50)}`, () => ctx.db.query(sql).run(...values));
+    const result = ctx._m(`SQL: ${sql.slice(0, 50)}`, () => ctx._stmt(sql).run(...values));
     return (result as any).changes ?? 0;
 }
 
@@ -247,7 +247,7 @@ export function insertMany<T extends Record<string, any>>(ctx: DatabaseContext, 
             const sql = columns.length === 0
                 ? `INSERT INTO "${entityName}" DEFAULT VALUES`
                 : `INSERT INTO "${entityName}" (${quotedCols.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`;
-            const result = ctx.db.query(sql).run(...Object.values(transformed));
+            const result = ctx._stmt(sql).run(...Object.values(transformed));
             ids.push(result.lastInsertRowid as number);
         }
         return ids;
