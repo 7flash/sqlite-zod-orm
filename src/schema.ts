@@ -76,10 +76,11 @@ export function getStorableFields(
 
 /** Map a Zod type to its SQLite column type */
 export function zodTypeToSqlType(zodType: ZodType): string {
-  if (zodType instanceof z.ZodOptional) {
-    zodType = zodType._def.innerType;
-  }
-  if (zodType instanceof z.ZodDefault) {
+  while (
+    zodType instanceof z.ZodOptional ||
+    zodType instanceof z.ZodNullable ||
+    zodType instanceof z.ZodDefault
+  ) {
     zodType = zodType._def.innerType;
   }
   if (zodType instanceof z.ZodString || zodType instanceof z.ZodDate)
@@ -129,10 +130,11 @@ export function transformFromStorage(
   const transformed: Record<string, any> = {};
   for (const [key, value] of Object.entries(row)) {
     let fieldSchema = asZodObject(schema).shape[key];
-    if (fieldSchema instanceof z.ZodOptional) {
-      fieldSchema = fieldSchema._def.innerType;
-    }
-    if (fieldSchema instanceof z.ZodDefault) {
+    while (
+      fieldSchema instanceof z.ZodOptional ||
+      fieldSchema instanceof z.ZodNullable ||
+      fieldSchema instanceof z.ZodDefault
+    ) {
       fieldSchema = fieldSchema._def.innerType;
     }
     if (fieldSchema instanceof z.ZodDate && typeof value === "string") {

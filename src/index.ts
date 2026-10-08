@@ -9,6 +9,7 @@ export type { DatabaseType } from "./database";
 export type {
   SchemaMap,
   DatabaseOptions,
+  TransactionOptions,
   Relationship,
   EntityAccessor,
   TypedAccessors,

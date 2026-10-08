@@ -17,6 +17,7 @@ import {
 import type {
   SchemaMap,
   DatabaseOptions,
+  TransactionOptions,
   Relationship,
   RelationsConfig,
   EntityAccessor,
@@ -37,7 +38,7 @@ import {
   getStorableFields,
   zodTypeToSqlType,
 } from "./schema";
-import { transformFromStorage } from "./schema";
+import { transformFromStorage, transformForStorage } from "./schema";
 import type { DatabaseContext } from "./context";
 import {
   upsertOnConflict as nativeUpsertOnConflict,
@@ -104,6 +105,7 @@ class _Database<Schemas extends SchemaMap> {
 
   /** Prepared statement cache — avoids re-compiling identical SQL. */
   private _stmtCache = new Map<string, ReturnType<SqliteDatabase["query"]>>();
+  private _schemaRebuildLogs: string[] = [];
 
   /** Get or create a cached prepared statement. */
   private _stmt(sql: string): ReturnType<SqliteDatabase["query"]> {
@@ -132,9 +134,23 @@ class _Database<Schemas extends SchemaMap> {
     this._debug = options.debug === true;
     this._measure = createMeasure("satidb");
 
+    const busyTimeout = options.busyTimeout ?? 5000;
+    if (
+      !Number.isInteger(busyTimeout) ||
+      busyTimeout < 0 ||
+      busyTimeout > 2147483647
+    )
+      throw new RangeError(
+        "busyTimeout must be an integer between 0 and 2147483647 ms",
+      );
     this.db = new SqliteDatabase(dbFile);
-    if (options.wal !== false) this.db.run("PRAGMA journal_mode = WAL");
-    this.db.run("PRAGMA foreign_keys = ON");
+    try {
+      this.db.run(`PRAGMA busy_timeout = ${busyTimeout}`);
+      if (options.wal !== false) this.db.run("PRAGMA journal_mode = WAL");
+    } catch (error) {
+      this.db.close(true);
+      throw error;
+    }
     this.schemas = schemas;
     this.viewDefinitions = options.views ?? {};
     this.allSchemas = {
@@ -151,9 +167,14 @@ class _Database<Schemas extends SchemaMap> {
     this._timestamps = options.timestamps === true;
     this._softDeletes = options.softDeletes === true;
     this._pollInterval = options.pollInterval ?? 100;
-    this.relationships = options.relations
-      ? parseRelationsConfig(options.relations, this.allSchemas)
-      : [];
+    try {
+      this.relationships = options.relations
+        ? parseRelationsConfig(options.relations, this.allSchemas)
+        : [];
+    } catch (error) {
+      this.db.close(true);
+      throw error;
+    }
 
     // Build the context that extracted modules use
     this._ctx = {
@@ -173,17 +194,41 @@ class _Database<Schemas extends SchemaMap> {
       _stmt: (sql: string) => this._stmt(sql),
     };
 
-    this._m("Sync tables", () => this.syncTablesToSchemas());
-    if (options.indexes)
-      this._m("Create indexes", () => this.createIndexes(options.indexes!));
-    if (options.unique)
-      this._m("Unique constraints", () =>
-        this.createUniqueConstraints(options.unique!),
-      );
-    if (options.views)
-      this._m("Create views", () => this.createOrUpdateViews(options.views!));
-    if (this._reactive)
-      this._m("Change tracking", () => this.initializeChangeTracking());
+    // Foreign keys must be disabled outside the transaction for safe table
+    // replacement. Check them before committing, then enable normal enforcement.
+    try {
+      this.db.run("PRAGMA foreign_keys = OFF");
+      this.db
+        .transaction(() => {
+          this._m("Sync tables", () => this.syncTablesToSchemas());
+          if (options.indexes)
+            this._m("Create indexes", () =>
+              this.createIndexes(options.indexes!),
+            );
+          if (options.unique)
+            this._m("Unique constraints", () =>
+              this.createUniqueConstraints(options.unique!),
+            );
+          if (options.views)
+            this._m("Create views", () =>
+              this.createOrUpdateViews(options.views!),
+            );
+          if (this._reactive)
+            this._m("Change tracking", () => this.initializeChangeTracking());
+          if (this._schemaRebuildLogs.length) {
+            const violations = this.db.query("PRAGMA foreign_key_check").all();
+            if (violations.length)
+              throw new Error("Schema sync would leave foreign key violations");
+          }
+        })
+        .immediate();
+      this.db.run("PRAGMA foreign_keys = ON");
+    } catch (error) {
+      this.db.close(true);
+      throw error;
+    }
+    for (const message of this._schemaRebuildLogs) console.warn(message);
+    this._schemaRebuildLogs = [];
 
     // Create typed entity accessors (db.users, db.posts, etc.)
     for (const entityName of Object.keys(schemas)) {
@@ -339,51 +384,125 @@ class _Database<Schemas extends SchemaMap> {
   // =========================================================================
 
   private syncTablesToSchemas(): void {
-    // Schema-first behavior: the Zod schema is the source of truth.
-    // If an existing table was created from an older/incompatible schema,
-    // keep its data by renaming it to table_vN and create a fresh table.
-    // We loop because renaming a parent table can cause SQLite to rewrite
-    // child table FK SQL to point at the backup name; the next pass catches
-    // and repairs those dependent tables too.
-    const maxPasses = Math.max(1, Object.keys(this.schemas).length + 1);
+    // Compare structure rather than CREATE TABLE formatting/column order.
+    for (const [entityName, schema] of Object.entries(this.schemas)) {
+      const expectedSql = this.createTableSql(entityName, schema);
+      const existing = this.db
+        .query(
+          `SELECT type, sql FROM sqlite_master WHERE name = ? AND type IN ('table', 'view')`,
+        )
+        .get(entityName) as { type?: string; sql?: string | null } | null;
 
-    for (let pass = 0; pass < maxPasses; pass++) {
-      let changed = false;
-
-      for (const [entityName, schema] of Object.entries(this.schemas)) {
-        const expectedSql = this.createTableSql(entityName, schema);
-        const existing = this.db
-          .query(
-            `SELECT type, sql FROM sqlite_master WHERE name = ? AND type IN ('table', 'view')`,
-          )
-          .get(entityName) as { type?: string; sql?: string | null } | null;
-
-        if (!existing) {
-          this.db.run(expectedSql);
-          changed = true;
-          continue;
-        }
-
-        if (existing.type !== "table") {
-          throw new Error(`"${entityName}" already exists and is not a table.`);
-        }
-
-        if (
-          this.normalizeSql(existing.sql ?? "") !==
-          this.normalizeSql(expectedSql)
-        ) {
-          this.backupAndRecreateTable(entityName, schema);
-          changed = true;
-          continue;
-        }
+      if (!existing) {
+        this.db.run(expectedSql);
+        continue;
       }
 
-      if (!changed) return;
-    }
+      if (existing.type !== "table") {
+        throw new Error(`"${entityName}" already exists and is not a table.`);
+      }
 
-    throw new Error(
-      "Schema sync did not stabilize. Check for conflicting table/view definitions.",
+      if (
+        this.normalizeSql(existing.sql ?? "") !== this.normalizeSql(expectedSql)
+      ) {
+        this.syncExistingTable(entityName, schema);
+        continue;
+      }
+    }
+  }
+
+  private syncExistingTable(entityName: string, schema: z.ZodType<any>): void {
+    const q = (name: string) => `"${this.escapeIdentifier(name)}"`;
+    type Column = { name: string; type: string; pk: number; notnull: number };
+    const existing = this.db
+      .query(`PRAGMA table_info(${q(entityName)})`)
+      .all() as Column[];
+    const fields = getStorableFields(schema);
+    const expected = new Map([
+      ["id", "INTEGER"],
+      ...fields.map(
+        (f) => [f.name, zodTypeToSqlType(f.type)] as [string, string],
+      ),
+      ...(this._timestamps
+        ? ([
+            ["createdAt", "TEXT"],
+            ["updatedAt", "TEXT"],
+          ] as [string, string][])
+        : []),
+      ...(this._softDeletes
+        ? ([["deletedAt", "TEXT"]] as [string, string][])
+        : []),
+    ]);
+    const foreignKeys = this.db
+      .query(`PRAGMA foreign_key_list(${q(entityName)})`)
+      .all() as {
+      table: string;
+      from: string;
+      to: string;
+      on_delete: string;
+      on_update: string;
+      seq: number;
+    }[];
+    const relations = this.relationships.filter(
+      (r) => r.type === "belongs-to" && r.from === entityName,
     );
+    const sameForeignKeys =
+      foreignKeys.length === relations.length &&
+      foreignKeys.every(
+        (fk) =>
+          fk.seq === 0 &&
+          fk.to === "id" &&
+          fk.on_delete === "SET NULL" &&
+          fk.on_update === "NO ACTION" &&
+          relations.some((r) => r.foreignKey === fk.from && r.to === fk.table),
+      );
+    if (
+      !sameForeignKeys ||
+      !existing.some((c) => c.name === "id" && c.pk === 1) ||
+      existing.some(
+        (c) =>
+          expected.get(c.name) !== c.type.toUpperCase() ||
+          c.pk !== (c.name === "id" ? 1 : 0),
+      )
+    ) {
+      this.backupAndRecreateTable(entityName, schema);
+      return;
+    }
+    const names = new Set(existing.map((c) => c.name));
+    const added = [...expected].filter(([name]) => !names.has(name));
+    const defaults = new Map<string, any>();
+    for (const [name] of added) {
+      const field = fields.find((f) => f.name === name);
+      const parsed = field?.type.safeParse(undefined);
+      defaults.set(
+        name,
+        parsed?.success
+          ? transformForStorage({ value: parsed.data }).value
+          : null,
+      );
+      if (field && !parsed?.success && !field.type.isNullable()) {
+        this.backupAndRecreateTable(entityName, schema);
+        return;
+      }
+    }
+    for (const [name, type] of added) {
+      const value = defaults.get(name);
+      const defaultSql =
+        value === undefined || value === null
+          ? ""
+          : ` DEFAULT ${this.sqlLiteral(value)}`;
+      this.db.run(
+        `ALTER TABLE ${q(entityName)} ADD COLUMN ${q(name)} ${type}${defaultSql}`,
+      );
+    }
+  }
+
+  private sqlLiteral(value: any): string {
+    if (typeof value === "number" && Number.isFinite(value))
+      return String(value);
+    if (typeof value === "string") return `'${value.replace(/'/g, "''")}'`;
+    if (value instanceof Buffer) return `X'${value.toString("hex")}'`;
+    throw new Error("Unsupported SQLite column default");
   }
 
   private createTableSql(entityName: string, schema: z.ZodType<any>): string {
@@ -427,18 +546,78 @@ class _Database<Schemas extends SchemaMap> {
   ): void {
     const backupName = this.nextBackupTableName(entityName);
 
+    const q = (name: string) => `"${this.escapeIdentifier(name)}"`;
+    const objects = this.db
+      .query(
+        "SELECT sql FROM sqlite_master WHERE tbl_name = ? AND type IN ('index', 'trigger')",
+      )
+      .all(entityName) as { sql: string | null }[];
+    if (objects.some((object) => object.sql === null))
+      throw new Error(
+        `Cannot automatically rebuild "${entityName}" with inline UNIQUE constraints; use an explicit migration.`,
+      );
+    const oldColumns = new Set(
+      (
+        this.db.query(`PRAGMA table_info(${q(entityName)})`).all() as {
+          name: string;
+        }[]
+      ).map((c) => c.name),
+    );
+    const sequence = this.objectExists("sqlite_sequence")
+      ? (this.db
+          .query("SELECT seq FROM sqlite_sequence WHERE name = ?")
+          .get(entityName) as { seq: number } | null)
+      : null;
     const txn = this.db.transaction(() => {
-      // Index and trigger names are global in SQLite. Drop ORM-owned ones
-      // before the rename so the fresh table can recreate them with the
-      // normal idx_/uq_/_trg_ names.
-      this.dropOrmManagedIndexes(entityName);
-      this.dropOrmManagedTriggers(entityName);
-
-      this.db.run(`ALTER TABLE "${entityName}" RENAME TO "${backupName}"`);
+      // Snapshot first, then replace using the original name. Renaming the old
+      // table would redirect foreign keys, views and application trigger bodies.
+      this.db.run(
+        `CREATE TABLE ${q(backupName)} AS SELECT * FROM ${q(entityName)}`,
+      );
+      this.db.run(`DROP TABLE ${q(entityName)}`);
       this.db.run(this.createTableSql(entityName, schema));
+      const columns = (
+        this.db.query(`PRAGMA table_info(${q(entityName)})`).all() as {
+          name: string;
+        }[]
+      ).map((c) => c.name);
+      const expressions = columns.map((name) => {
+        if (oldColumns.has(name)) return q(name);
+        const field = getStorableFields(schema).find((f) => f.name === name);
+        const parsed = field?.type.safeParse(undefined);
+        if (
+          !parsed?.success &&
+          field &&
+          !field.type.isNullable() &&
+          this.db.query(`SELECT 1 FROM ${q(backupName)} LIMIT 1`).get()
+        ) {
+          throw new Error(
+            `Cannot populate required column "${entityName}.${name}"; add a default or use an explicit migration.`,
+          );
+        }
+        if (
+          !parsed?.success ||
+          parsed.data === undefined ||
+          parsed.data === null
+        )
+          return "NULL";
+        return this.sqlLiteral(
+          transformForStorage({ value: parsed.data }).value,
+        );
+      });
+      this.db.run(
+        `INSERT INTO ${q(entityName)} (${columns.map(q).join(", ")}) SELECT ${expressions.join(", ")} FROM ${q(backupName)}`,
+      );
+      if (sequence)
+        this.db
+          .query("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = ?")
+          .run(sequence.seq, entityName);
+      for (const object of objects) this.db.run(object.sql!);
     });
-
     txn();
+    this._schemaRebuildLogs.push(
+      `[sqlite-zod-orm] Rebuilt "${entityName}"; copied rows from "${backupName}" and recreated ${objects.length} indexes/triggers.`,
+    );
   }
 
   private nextBackupTableName(tableName: string): string {
@@ -454,34 +633,6 @@ class _Database<Schemas extends SchemaMap> {
       .query(`SELECT 1 FROM sqlite_master WHERE name = ? LIMIT 1`)
       .get(name) as any;
     return !!row;
-  }
-
-  private dropOrmManagedIndexes(tableName: string): void {
-    const rows = this.db
-      .query(
-        `SELECT name
-             FROM sqlite_master
-             WHERE type = 'index'
-               AND tbl_name = ?
-               AND sql IS NOT NULL`,
-      )
-      .all(tableName) as { name: string }[];
-
-    const ownedPrefixes = [`idx_${tableName}_`, `uq_${tableName}_`];
-    for (const row of rows) {
-      if (!ownedPrefixes.some((prefix) => row.name.startsWith(prefix)))
-        continue;
-      this.db.run(`DROP INDEX IF EXISTS "${this.escapeIdentifier(row.name)}"`);
-    }
-  }
-
-  private dropOrmManagedTriggers(tableName: string): void {
-    for (const event of ["insert", "update", "delete"]) {
-      const triggerName = `_trg_${tableName}_${event}`;
-      this.db.run(
-        `DROP TRIGGER IF EXISTS "${this.escapeIdentifier(triggerName)}"`,
-      );
-    }
   }
 
   private escapeIdentifier(value: string): string {
@@ -729,15 +880,21 @@ class _Database<Schemas extends SchemaMap> {
   // Transactions
   // =========================================================================
 
-  public transaction<T>(callback: () => T): T {
-    return this._m("transaction", () => this.db.transaction(callback)());
+  public transaction<T>(
+    callback: () => T,
+    options: TransactionOptions = {},
+  ): T {
+    return this._m("transaction", () =>
+      this.db.transaction(callback)[options.mode ?? "immediate"](),
+    );
   }
 
   /** Close the database: stops polling, clears cache, and releases the SQLite handle. */
   public close(): void {
     this._stopPolling();
+    for (const stmt of this._stmtCache.values()) stmt.finalize();
     this._stmtCache.clear();
-    this.db.close();
+    this.db.close(true);
   }
 
   // =========================================================================
@@ -806,9 +963,7 @@ class _Database<Schemas extends SchemaMap> {
   }
 
   /** Return column info for a table via PRAGMA table_info. */
-  public columns(
-    tableName: string,
-  ): {
+  public columns(tableName: string): {
     name: string;
     type: string;
     notnull: number;

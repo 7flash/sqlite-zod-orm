@@ -1,10 +1,10 @@
 /**
  * migrator.ts — Interactive/data migration helpers for backup tables.
  *
- * Runtime schema sync intentionally keeps old data by renaming mismatched
- * tables to table_vN and creating a fresh current table. The migrator is the
- * deliberate follow-up tool: copy data from table_vN into the current table
- * with an explicit, reviewable column mapping.
+ * Runtime schema sync adds compatible columns in place. Incompatible changes
+ * snapshot old data to table_vN and copy shared columns to the replacement.
+ * The migrator supports historical backups and changes requiring explicit,
+ * reviewable column mappings.
  */
 
 export type MigrationBackup = {

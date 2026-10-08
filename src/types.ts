@@ -100,9 +100,11 @@ export type DatabaseOptions<
   /**
    * Enable WAL (Write-Ahead Logging) journal mode for better
    * concurrent read/write performance. Recommended for production.
-   * Default: `false`.
+   * Default: `true`.
    */
   wal?: boolean;
+  /** SQLite lock wait in milliseconds, set before WAL/schema work. Default: 5000. */
+  busyTimeout?: number;
   /**
    * Lifecycle hooks per table. Each hook receives data and can transform it.
    *
@@ -136,6 +138,11 @@ export type DatabaseOptions<
    * Each entry provides a Zod schema for typed reads and the SELECT body.
    */
   views?: V;
+};
+
+export type TransactionOptions = {
+  /** Acquire the write lock before reading. Default: "immediate". */
+  mode?: "immediate" | "deferred" | "exclusive";
 };
 
 export type Relationship = {

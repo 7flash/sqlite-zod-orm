@@ -41,6 +41,21 @@ const db = new Database('app.db', {
 
 Tables are auto-created and auto-migrated from your Zod schemas. No SQL required.
 
+New optional, nullable, or defaulted fields use `ALTER TABLE ADD COLUMN`, preserving
+rows, indexes and triggers. Defaults are evaluated once during migration and stored
+in SQLite format (including JSON and booleans). Column order changes do not rebuild
+tables. Incompatible changes retain a `table_vN` snapshot, copy shared columns and
+recreate existing indexes and triggers in one transaction, with a rebuild warning
+after commit. If an index cannot be recreated, or a new required field cannot be
+populated, initialization rolls back; use an explicit migration for those changes.
+Rebuilds involving inline `UNIQUE` constraints also require an explicit migration.
+Historical backup tables are retained for deliberate recovery through `db.migrator()`.
+
+All startup schema work (tables, indexes, unique constraints, views and change
+tracking) runs under `BEGIN IMMEDIATE`. SQLite waits for locks before WAL or schema
+work; configure the wait with `{ busyTimeout: 10000 }` (milliseconds, default 5000;
+zero disables waiting).
+
 ## CRUD
 
 ```typescript
@@ -159,6 +174,12 @@ db.transaction(() => {
     db.orders.insert({ userId: 1, amount: 100 });
 }); // auto-commits; rolls back on error
 ```
+
+Transactions are synchronous and default to `BEGIN IMMEDIATE`, acquiring the write
+lock before the callback reads. Lock contention waits for `busyTimeout`; once that
+expires, SQLite throws. Callbacks are never automatically replayed. Nested
+transactions use savepoints. For read-only work or deliberate alternative locking,
+pass `db.transaction(work, { mode: 'deferred' })` or `{ mode: 'exclusive' }`.
 
 ## Data Import / Export
 
