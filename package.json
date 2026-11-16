@@ -24,7 +24,9 @@
   "files": [
     "src",
     "dist",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "UPGRADING.md"
   ],
   "keywords": [
     "sqlite",
