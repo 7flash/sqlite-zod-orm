@@ -460,6 +460,16 @@ region: z.string(),
 
 Choose a default that is valid for the application's data model. When no universal default exists, use an explicit backfill based on existing records.
 
+## 11. Field names in `where()` are identifiers, not SQL
+
+`where({ field: value })` now quotes `field` as a column name (`table.column` is allowed). A SQL expression used as a field name, for example `json_extract(data, '$.name')`, no longer works. Use `whereRaw` with bound parameters:
+
+```ts
+db.users.select().whereRaw("json_extract(data, ?) = ?", ["$.name", name]).all();
+```
+
+Unknown operators inside `$or`, malformed `$in`/`$between` values, and more than 32766 bound parameters in one statement now throw.
+
 ## Upgrade checklist
 
 Before deploying version 4.0.0:

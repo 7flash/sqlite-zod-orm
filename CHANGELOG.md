@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Security
+
+- Field names in `where()` (including inside `$or`) were written into SQL unquoted, so an app that let users choose the filter field was open to SQL injection. Field names are now quoted identifiers; values were always bound parameters.
+- The callback query style now quotes column names, accepts only plain identifiers as function names, and only known operators.
+- Operator keys must be real operators (`$in`, not inherited names like `constructor`); `$in`, `$notIn` and `$between` inputs are validated; a statement may bind at most 32766 parameters.
+
 ### Fixed
 
 - Rows with multiple foreign keys referencing the same table now load the correct related record for each key instead of mixing up related records.
