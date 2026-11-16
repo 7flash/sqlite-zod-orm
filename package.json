@@ -26,7 +26,8 @@
     "dist",
     "README.md",
     "CHANGELOG.md",
-    "UPGRADING.md"
+    "UPGRADING.md",
+    "SKILL.md"
   ],
   "keywords": [
     "sqlite",
