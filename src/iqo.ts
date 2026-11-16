@@ -92,6 +92,22 @@ export function quoteIdentifierPath(field: string): string {
 }
 
 const MAX_SQL_PARAMS = 32766;
+
+/** LIMIT/OFFSET are written as text, so they must be plain non-negative integers. */
+function sqlCount(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+    throw new Error(`${label} must be a non-negative integer, got ${JSON.stringify(value)}`);
+  return value;
+}
+
+function sqlDirection(direction: unknown): "ASC" | "DESC" {
+  const d = typeof direction === "string" ? direction.toUpperCase() : "";
+  if (d !== "ASC" && d !== "DESC")
+    throw new Error(`ORDER BY direction must be "asc" or "desc", got ${JSON.stringify(direction)}`);
+  return d;
+}
+
+const HAVING_OPERATORS = new Set(["=", "!=", ">", ">=", "<", "<=", "IS NULL", "IS NOT NULL"]);
 const SCALAR_OPERATORS = new Set(["=", ">", ">=", "<", "<=", "!=", "LIKE"]);
 
 function compileWhereCondition(
@@ -141,25 +157,28 @@ export function compileIQO(
   // SELECT clause
   const selectParts: string[] = [];
   if (iqo.selects.length > 0) {
-    selectParts.push(...iqo.selects.map((s) => `${tableName}.${s}`));
+    selectParts.push(...iqo.selects.map((s) => `${quoteIdentifierPath(tableName)}.${quoteIdentifierPath(s)}`));
   } else {
-    selectParts.push(`${tableName}.*`);
+    selectParts.push(`${quoteIdentifierPath(tableName)}.*`);
   }
   for (const j of iqo.joins) {
     if (j.columns.length > 0) {
       selectParts.push(
-        ...j.columns.map((c) => `${j.table}.${c} AS ${j.table}_${c}`),
+        ...j.columns.map(
+          (c) =>
+            `${quoteIdentifierPath(j.table)}.${quoteIdentifierPath(c)} AS ${quoteIdentifierPath(`${j.table}_${c}`)}`,
+        ),
       );
     } else {
-      selectParts.push(`${j.table}.*`);
+      selectParts.push(`${quoteIdentifierPath(j.table)}.*`);
     }
   }
 
-  let sql = `SELECT ${iqo.distinct ? "DISTINCT " : ""}${selectParts.join(", ")} FROM ${tableName}`;
+  let sql = `SELECT ${iqo.distinct ? "DISTINCT " : ""}${selectParts.join(", ")} FROM ${quoteIdentifierPath(tableName)}`;
 
   // JOIN clauses
   for (const j of iqo.joins) {
-    sql += ` JOIN ${j.table} ON ${tableName}.${j.fromCol} = ${j.table}.${j.toCol}`;
+    sql += ` JOIN ${quoteIdentifierPath(j.table)} ON ${quoteIdentifierPath(tableName)}.${quoteIdentifierPath(j.fromCol)} = ${quoteIdentifierPath(j.table)}.${quoteIdentifierPath(j.toCol)}`;
   }
 
   // WHERE clause — AST-based takes precedence if set
@@ -218,13 +237,15 @@ export function compileIQO(
 
   // GROUP BY
   if (iqo.groupBy.length > 0) {
-    sql += ` GROUP BY ${iqo.groupBy.join(", ")}`;
+    sql += ` GROUP BY ${iqo.groupBy.map(quoteIdentifierPath).join(", ")}`;
   }
 
   // HAVING
   if (iqo.having && iqo.having.length > 0) {
     const havingParts: string[] = [];
     for (const h of iqo.having) {
+      if (!HAVING_OPERATORS.has(h.operator))
+        throw new Error(`Unsupported HAVING operator: ${String(h.operator)}`);
       if (h.operator === "IS NULL") {
         havingParts.push(`${h.field} IS NULL`);
       } else if (h.operator === "IS NOT NULL") {
@@ -242,13 +263,16 @@ export function compileIQO(
   // ORDER BY
   if (iqo.orderBy.length > 0) {
     const parts = iqo.orderBy.map(
-      (o) => `${o.field} ${o.direction.toUpperCase()}`,
+      (o) => `${quoteIdentifierPath(o.field)} ${sqlDirection(o.direction)}`,
     );
     sql += ` ORDER BY ${parts.join(", ")}`;
   }
 
-  if (iqo.limit !== null) sql += ` LIMIT ${iqo.limit}`;
-  if (iqo.offset !== null) sql += ` OFFSET ${iqo.offset}`;
+  if (iqo.limit !== null) sql += ` LIMIT ${sqlCount(iqo.limit, "limit")}`;
+  if (iqo.offset !== null) {
+    if (iqo.limit === null) sql += " LIMIT -1";
+    sql += ` OFFSET ${sqlCount(iqo.offset, "offset")}`;
+  }
 
   if (params.length > MAX_SQL_PARAMS)
     throw new Error(`Query exceeds ${MAX_SQL_PARAMS} bound parameters`);

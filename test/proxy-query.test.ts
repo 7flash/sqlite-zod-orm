@@ -108,11 +108,13 @@ test("compileProxyQuery: LIMIT", () => {
   const { proxy, aliasMap } = createContextProxy(schemas);
   const u = (proxy as any).users;
 
-  const { sql } = compileProxyQuery(
+  const { sql, params } = compileProxyQuery(
     { select: { name: u.name }, limit: 5 },
     aliasMap,
   );
-  expect(sql).toContain("LIMIT 5");
+  // The limit is validated and bound, never written into the SQL text.
+  expect(sql).toContain("LIMIT ?");
+  expect(params.at(-1)).toBe(5);
 });
 
 test("compileProxyQuery: ORDER BY", () => {

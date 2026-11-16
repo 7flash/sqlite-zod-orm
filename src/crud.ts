@@ -9,6 +9,10 @@ import { asZodObject } from "./types";
 import { transformForStorage, transformFromStorage } from "./schema";
 import type { DatabaseContext } from "./context";
 
+function qi(name: string): string {
+  return `"${name.replace(/"/g, '""')}"`;
+}
+
 // ---------------------------------------------------------------------------
 // Read helpers
 // ---------------------------------------------------------------------------
@@ -19,7 +23,7 @@ export function getById(
   id: number,
 ): AugmentedEntity<any> | null {
   const row = ctx
-    ._stmt(`SELECT * FROM "${entityName}" WHERE id = ?`)
+    ._stmt(`SELECT * FROM ${qi(entityName)} WHERE id = ?`)
     .get(id) as any;
   if (!row) return null;
   return ctx.attachMethods(
@@ -35,7 +39,7 @@ export function getOne(
 ): AugmentedEntity<any> | null {
   const { clause, values } = ctx.buildWhereClause(conditions);
   const row = ctx
-    ._stmt(`SELECT * FROM "${entityName}" ${clause} LIMIT 1`)
+    ._stmt(`SELECT * FROM ${qi(entityName)} ${clause} LIMIT 1`)
     .get(...values) as any;
   if (!row) return null;
   return ctx.attachMethods(
@@ -51,7 +55,7 @@ export function findMany(
 ): AugmentedEntity<any>[] {
   const { clause, values } = ctx.buildWhereClause(conditions);
   const rows = ctx
-    ._stmt(`SELECT * FROM "${entityName}" ${clause}`)
+    ._stmt(`SELECT * FROM ${qi(entityName)} ${clause}`)
     .all(...values);
   return rows.map((row: any) =>
     ctx.attachMethods(
@@ -92,11 +96,11 @@ function executeInsert<T extends Record<string, any>>(
 
   const columns = Object.keys(transformed);
 
-  const quotedCols = columns.map((c) => `"${c}"`);
+  const quotedCols = columns.map(qi);
   const sql =
     columns.length === 0
-      ? `INSERT INTO "${entityName}" DEFAULT VALUES`
-      : `INSERT INTO "${entityName}" (${quotedCols.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`;
+      ? `INSERT INTO ${qi(entityName)} DEFAULT VALUES`
+      : `INSERT INTO ${qi(entityName)} (${quotedCols.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`;
 
   let lastId = 0;
   ctx._m(`SQL: ${sql.slice(0, 40)}`, () => {
@@ -147,9 +151,9 @@ export function update<T extends Record<string, any>>(
   }
 
   const setClause = Object.keys(transformed)
-    .map((key) => `"${key}" = ?`)
+    .map((key) => `${qi(key)} = ?`)
     .join(", ");
-  const sql = `UPDATE "${entityName}" SET ${setClause} WHERE id = ?`;
+  const sql = `UPDATE ${qi(entityName)} SET ${setClause} WHERE id = ?`;
   ctx._m(`SQL: UPDATE ${entityName} SET ...`, () => {
     ctx._stmt(sql).run(...Object.values(transformed), id);
   });
@@ -178,9 +182,9 @@ export function updateWhere(
     throw new Error("update().where() requires at least one condition");
 
   const setCols = Object.keys(transformed);
-  const setClause = setCols.map((key) => `"${key}" = ?`).join(", ");
+  const setClause = setCols.map((key) => `${qi(key)} = ?`).join(", ");
   const result = ctx
-    ._stmt(`UPDATE "${entityName}" SET ${setClause} ${clause}`)
+    ._stmt(`UPDATE ${qi(entityName)} SET ${setClause} ${clause}`)
     .run(...setCols.map((key) => transformed[key]), ...whereValues);
 
   return (result as any).changes ?? 0;
@@ -256,7 +260,7 @@ export function deleteEntity(
     if (result === false) return;
   }
 
-  ctx._stmt(`DELETE FROM "${entityName}" WHERE id = ?`).run(id);
+  ctx._stmt(`DELETE FROM ${qi(entityName)} WHERE id = ?`).run(id);
 
   // afterDelete hook
   if (hooks?.afterDelete) hooks.afterDelete(id);
@@ -275,14 +279,14 @@ export function deleteWhere(
   if (ctx.softDeletes) {
     // Soft delete: set deletedAt instead of removing rows
     const now = new Date().toISOString();
-    const sql = `UPDATE "${entityName}" SET "deletedAt" = ? ${clause}`;
+    const sql = `UPDATE ${qi(entityName)} SET "deletedAt" = ? ${clause}`;
     const result = ctx._m(`SQL: ${sql.slice(0, 50)}`, () =>
       ctx._stmt(sql).run(now, ...values),
     );
     return (result as any).changes ?? 0;
   }
 
-  const sql = `DELETE FROM "${entityName}" ${clause}`;
+  const sql = `DELETE FROM ${qi(entityName)} ${clause}`;
   const result = ctx._m(`SQL: ${sql.slice(0, 50)}`, () =>
     ctx._stmt(sql).run(...values),
   );
@@ -337,11 +341,11 @@ export function insertMany<T extends Record<string, any>>(
       }
 
       const columns = Object.keys(transformed);
-      const quotedCols = columns.map((c) => `"${c}"`);
+      const quotedCols = columns.map(qi);
       const sql =
         columns.length === 0
-          ? `INSERT INTO "${entityName}" DEFAULT VALUES`
-          : `INSERT INTO "${entityName}" (${quotedCols.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`;
+          ? `INSERT INTO ${qi(entityName)} DEFAULT VALUES`
+          : `INSERT INTO ${qi(entityName)} (${quotedCols.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`;
       const result = ctx._stmt(sql).run(...Object.values(transformed));
       ids.push(result.lastInsertRowid as number);
     }

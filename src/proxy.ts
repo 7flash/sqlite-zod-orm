@@ -25,7 +25,7 @@ export class ColumnNode {
 
   /** Quoted alias.column for use as computed property key */
   toString(): string {
-    return `"${this.alias}"."${this.column}"`;
+    return qRef(this.alias, this.column);
   }
 
   [Symbol.toPrimitive](): string {
@@ -36,11 +36,26 @@ export class ColumnNode {
 // ---------- SQL Quoting Helpers ----------
 
 function q(name: string): string {
-  return `"${name}"`;
+  return `"${name.replace(/"/g, '""')}"`;
 }
 
 function qRef(alias: string, column: string): string {
-  return `"${alias}"."${column}"`;
+  return `${q(alias)}.${q(column)}`;
+}
+
+function parseQuotedRef(key: string): { alias: string; column: string } | null {
+  const match = key.match(/^"((?:[^"]|"")*)"\."((?:[^"]|"")*)"$/);
+  if (!match) return null;
+  return {
+    alias: match[1]!.replace(/""/g, '"'),
+    column: match[2]!.replace(/""/g, '"'),
+  };
+}
+
+function assertNonNegativeInteger(value: unknown, label: string): asserts value is number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative safe integer`);
+  }
 }
 
 // ---------- Table Proxy ----------
@@ -59,6 +74,10 @@ function createTableProxy(
       ) {
         return undefined;
       }
+      // Columns are not limited to the Zod shape: the ORM adds id, timestamps
+      // and relation keys. Every column name is quoted when compiled, which
+      // is what keeps a name from becoming SQL.
+      if (typeof prop !== "string") return undefined;
       return new ColumnNode(tableName, prop, alias);
     },
     ownKeys() {
@@ -97,6 +116,7 @@ export function createContextProxy(schemas: Record<string, z.ZodType<any>>): {
       if (typeof tableName !== "string") return undefined;
 
       const schema = schemas[tableName];
+      if (!schema) throw new Error(`Unknown table '${tableName}'`);
       const shape = schema ? (schema as unknown as z.ZodObject<any>).shape : {};
       const columns = new Set(Object.keys(shape));
 
@@ -197,9 +217,9 @@ export function compileProxyQuery(
 
     for (const [key, value] of Object.entries(queryResult.where)) {
       let fieldRef: string;
-      const quotedMatch = key.match(/^"([^"]+)"\."([^"]+)"$/);
-      if (quotedMatch && tablesUsed.has(quotedMatch[1]!)) {
-        fieldRef = key;
+      const quotedMatch = parseQuotedRef(key);
+      if (quotedMatch && tablesUsed.has(quotedMatch.alias)) {
+        fieldRef = qRef(quotedMatch.alias, quotedMatch.column);
       } else {
         fieldRef = qRef(primaryAlias.alias, key);
       }
@@ -259,11 +279,14 @@ export function compileProxyQuery(
     const parts: string[] = [];
     for (const [key, dir] of Object.entries(queryResult.orderBy)) {
       let fieldRef: string;
-      const quotedMatch = key.match(/^"([^"]+)"\."([^"]+)"$/);
-      if (quotedMatch && tablesUsed.has(quotedMatch[1]!)) {
-        fieldRef = key;
+      const quotedMatch = parseQuotedRef(key);
+      if (quotedMatch && tablesUsed.has(quotedMatch.alias)) {
+        fieldRef = qRef(quotedMatch.alias, quotedMatch.column);
       } else {
         fieldRef = qRef(primaryAlias.alias, key);
+      }
+      if (typeof dir !== "string" || !/^(asc|desc)$/i.test(dir)) {
+        throw new Error(`Invalid ORDER BY direction: ${String(dir)}`);
       }
       parts.push(`${fieldRef} ${dir.toUpperCase()}`);
     }
@@ -281,8 +304,18 @@ export function compileProxyQuery(
   }
 
   // LIMIT / OFFSET
-  if (queryResult.limit !== undefined) sql += ` LIMIT ${queryResult.limit}`;
-  if (queryResult.offset !== undefined) sql += ` OFFSET ${queryResult.offset}`;
+  if (queryResult.limit !== undefined) {
+    assertNonNegativeInteger(queryResult.limit, "limit");
+    sql += " LIMIT ?";
+    params.push(queryResult.limit);
+  } else if (queryResult.offset !== undefined) {
+    sql += " LIMIT -1";
+  }
+  if (queryResult.offset !== undefined) {
+    assertNonNegativeInteger(queryResult.offset, "offset");
+    sql += " OFFSET ?";
+    params.push(queryResult.offset);
+  }
 
   return { sql, params };
 }

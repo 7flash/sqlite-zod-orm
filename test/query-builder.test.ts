@@ -27,7 +27,7 @@ test("compileIQO: empty IQO produces SELECT * FROM table", () => {
     having: [],
     distinct: false,
   });
-  expect(sql).toBe("SELECT users.* FROM users");
+  expect(sql).toBe('SELECT "users".* FROM "users"');
   expect(params).toEqual([]);
 });
 
@@ -48,7 +48,7 @@ test("compileIQO: specific columns", () => {
     having: [],
     distinct: false,
   });
-  expect(sql).toBe("SELECT users.name, users.age FROM users");
+  expect(sql).toBe('SELECT "users"."name", "users"."age" FROM "users"');
 });
 
 test("compileIQO: WHERE conditions", () => {
@@ -71,7 +71,7 @@ test("compileIQO: WHERE conditions", () => {
     having: [],
     distinct: false,
   });
-  expect(sql).toBe('SELECT users.* FROM users WHERE "name" = ? AND "age" > ?');
+  expect(sql).toBe('SELECT "users".* FROM "users" WHERE "name" = ? AND "age" > ?');
   expect(params).toEqual(["Alice", 18]);
 });
 
@@ -134,7 +134,7 @@ test("compileIQO: ORDER BY, LIMIT, OFFSET", () => {
     distinct: false,
   });
   expect(sql).toBe(
-    "SELECT users.* FROM users ORDER BY name ASC LIMIT 10 OFFSET 20",
+    'SELECT "users".* FROM "users" ORDER BY "name" ASC LIMIT 10 OFFSET 20',
   );
 });
 
@@ -238,9 +238,9 @@ test("QueryBuilder: chaining builds correct SQL", () => {
     .all();
 
   const sql = calls[0]!.sql;
-  expect(sql).toContain("users.name, users.age");
+  expect(sql).toContain('"users"."name", "users"."age"');
   expect(sql).toContain("WHERE");
-  expect(sql).toContain("ORDER BY age DESC");
+  expect(sql).toContain('ORDER BY "age" DESC');
   expect(sql).toContain("LIMIT 5");
   expect(sql).toContain("OFFSET 10");
 });
