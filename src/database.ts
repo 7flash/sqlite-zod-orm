@@ -475,10 +475,102 @@ class _Database<Schemas extends SchemaMap> {
     return `CREATE TABLE "${entityName}" (${body})`;
   }
 
+  /** Refuse implicit migrations that would lose values or SQLite semantics. */
+  private assertSafeRebuild(entityName: string, schema: z.ZodType<any>): void {
+    const q = (name: string) => `"${this.escapeIdentifier(name)}"`;
+    const columns = this.db.query(`PRAGMA table_info(${q(entityName)})`).all() as {
+      name: string;
+      type: string;
+      notnull: number;
+    }[];
+    const expected = new Map<string, string>([
+      ["id", "INTEGER"],
+      ...getStorableFields(schema).map((field) =>
+        [field.name, zodTypeToSqlType(field.type)] as [string, string]),
+      ...(this._timestamps ? [["createdAt", "TEXT"], ["updatedAt", "TEXT"]] as [string, string][] : []),
+      ...(this._softDeletes ? [["deletedAt", "TEXT"]] as [string, string][] : []),
+    ]);
+    const oldNames = new Set(columns.map((column) => column.name));
+    const additions = [...expected.keys()].filter((name) => !oldNames.has(name));
+    const populated = (name: string) => !!this.db.query(
+      `SELECT 1 FROM ${q(entityName)} WHERE ${q(name)} IS NOT NULL LIMIT 1`,
+    ).get();
+
+    for (const column of columns) {
+      const nextType = expected.get(column.name);
+      if (nextType && column.type.trim().toUpperCase() !== nextType && populated(column.name)) {
+        throw new Error(
+          `Cannot automatically change type of populated column "${entityName}.${column.name}" ` +
+          `from ${column.type} to ${nextType}; use an explicit data-conversion migration.`,
+        );
+      }
+    }
+    if (additions.length) {
+      const removed = columns.find((column) =>
+        !expected.has(column.name) && populated(column.name));
+      if (removed) {
+        throw new Error(
+          `Cannot automatically drop populated column "${entityName}.${removed.name}" ` +
+          `while adding ${additions.map(q).join(", ")}; use an explicit column-mapping migration.`,
+        );
+      }
+    }
+
+    // The generated DDL contains no CHECK, NOT NULL or conflict-resolution
+    // clauses. Strip literals, quoted identifiers and comments so words inside
+    // user data/column names are not mistaken for constraints.
+    const ddl = this.db.query(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+    ).get(entityName) as { sql: string } | null;
+    if (!ddl) throw new Error(`Cannot inspect table "${entityName}" before rebuild.`);
+    const clauses = ddl.sql.replace(
+      /'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\[(?:\]\]|[^\]])*\]|--[^\r\n]*|\/\*[\s\S]*?\*\//g,
+      " ",
+    );
+    const unsupported = /\bCHECK\s*\(/i.test(clauses) ? "CHECK" :
+      /\bON\s+CONFLICT\b/i.test(clauses) ? "ON CONFLICT" :
+      (columns.some((column) => column.notnull) || /\bNOT\s+NULL\b/i.test(clauses))
+        ? "NOT NULL" : null;
+    if (unsupported) {
+      throw new Error(
+        `Cannot automatically rebuild "${entityName}": legacy ${unsupported} ` +
+        `constraint/policy cannot be recreated; use an explicit constraint-preserving migration.`,
+      );
+    }
+
+    // Check every outgoing FK, including target columns, composite FKs and
+    // actions. foreign_key_check tests data only, not changed delete behavior.
+    type ForeignKey = {
+      id: number; seq: number; table: string; from: string; to: string | null;
+      on_delete: string; on_update: string;
+    };
+    const existing = this.db.query(`PRAGMA foreign_key_list(${q(entityName)})`).all() as ForeignKey[];
+    const recreated = this.relationships
+      .filter((relation) => relation.type === "belongs-to" && relation.from === entityName)
+      .map((relation) => ({
+        seq: 0, table: relation.to, from: relation.foreignKey, to: "id",
+        on_delete: "SET NULL", on_update: "NO ACTION",
+      }));
+    const identity = (fk: Omit<ForeignKey, "id">) => [
+      fk.seq, fk.table.toLowerCase(), fk.from.toLowerCase(),
+      (fk.to ?? "").toLowerCase(), fk.on_delete.toUpperCase(), fk.on_update.toUpperCase(),
+    ].join("|");
+    const actualKeys = existing.map(identity).sort();
+    const expectedKeys = recreated.map(identity).sort();
+    if (actualKeys.length !== expectedKeys.length ||
+        actualKeys.some((key, index) => key !== expectedKeys[index])) {
+      throw new Error(
+        `Cannot automatically rebuild "${entityName}": outgoing foreign keys ` +
+        `(targets or ON DELETE/ON UPDATE actions) differ; use an explicit foreign-key migration.`,
+      );
+    }
+  }
+
   private backupAndRecreateTable(
     entityName: string,
     schema: z.ZodType<any>,
   ): void {
+    this.assertSafeRebuild(entityName, schema);
     const backupName = this.nextBackupTableName(entityName);
 
     const q = (name: string) => `"${this.escapeIdentifier(name)}"`;
