@@ -19,6 +19,25 @@ export function parseRelationsConfig(
 ): Relationship[] {
   const relationships: Relationship[] = [];
   const added = new Set<string>();
+  const navigationNames = new Set<string>();
+  // Generated columns must never be replaced by lazy accessors. Reserve them
+  // independently of whether the corresponding option is currently enabled.
+  const reserved = new Set([
+    "id", "update", "delete", "createdAt", "updatedAt", "deletedAt",
+  ]);
+  const navigationName = (table: string, base: string) => {
+    const shape = asZodObject(schemas[table]!).shape;
+    let name = base;
+    while (Object.prototype.hasOwnProperty.call(shape, name) || reserved.has(name)) {
+      name += "Relation";
+    }
+    const key = `${table}.${name}`;
+    if (navigationNames.has(key)) {
+      throw new Error(`relations: conflicting navigation accessor '${key}'`);
+    }
+    navigationNames.add(key);
+    return name;
+  };
 
   for (const [fromTable, rels] of Object.entries(relations)) {
     if (!schemas[fromTable]) {
@@ -41,7 +60,7 @@ export function parseRelationsConfig(
           type: "belongs-to",
           from: fromTable,
           to: toTable,
-          relationshipField: navField,
+          relationshipField: navigationName(fromTable, navField),
           foreignKey: fkColumn,
         });
         added.add(btKey);
@@ -49,12 +68,17 @@ export function parseRelationsConfig(
 
       // auto-infer one-to-many inverse: authors.books → books[]
       const otmKey = `${toTable}.${fromTable}:one-to-many`;
+      if (added.has(otmKey)) {
+        throw new Error(
+          `relations: ambiguous inverse from '${toTable}' to '${fromTable}'; multiple foreign keys require explicit navigation`,
+        );
+      }
       if (!added.has(otmKey)) {
         relationships.push({
           type: "one-to-many",
           from: toTable,
           to: fromTable,
-          relationshipField: fromTable, // e.g. 'books'
+          relationshipField: navigationName(toTable, fromTable), // e.g. 'books'
           foreignKey: "",
         });
         added.add(otmKey);
@@ -76,21 +100,28 @@ export function getStorableFields(
 
 /** Map a Zod type to its SQLite column type */
 export function zodTypeToSqlType(zodType: ZodType): string {
+  // Zod 4's unwrap() returns the core $ZodType, not necessarily the public
+  // ZodType interface. Narrow by runtime constructor after unwrapping.
+  let inner: z.core.$ZodType = zodType;
   while (
-    zodType instanceof z.ZodOptional ||
-    zodType instanceof z.ZodNullable ||
-    zodType instanceof z.ZodDefault
+    inner instanceof z.ZodOptional ||
+    inner instanceof z.ZodNullable ||
+    inner instanceof z.ZodDefault ||
+    inner instanceof z.ZodPrefault ||
+    inner instanceof z.ZodReadonly ||
+    inner instanceof z.ZodNonOptional
   ) {
-    zodType = zodType._def.innerType;
+    inner = inner.unwrap();
   }
-  if (zodType instanceof z.ZodString || zodType instanceof z.ZodDate)
+  if (inner instanceof z.ZodString || inner instanceof z.ZodDate)
     return "TEXT";
-  if (zodType instanceof z.ZodNumber || zodType instanceof z.ZodBoolean)
+  if (inner instanceof z.ZodNumber || inner instanceof z.ZodBoolean)
     return "INTEGER";
-  if (zodType instanceof z.ZodEnum) return "TEXT";
+  if (inner instanceof z.ZodEnum) return "TEXT";
   if (
-    (zodType as any)._def.typeName === "ZodInstanceOf" &&
-    (zodType as any)._def.type === Buffer
+    inner instanceof z.ZodCustom &&
+    inner.safeParse(Buffer.alloc(0)).success &&
+    !inner.safeParse("").success
   )
     return "BLOB";
   // z.object(), z.array(), z.record() → stored as JSON TEXT
@@ -133,9 +164,12 @@ export function transformFromStorage(
     while (
       fieldSchema instanceof z.ZodOptional ||
       fieldSchema instanceof z.ZodNullable ||
-      fieldSchema instanceof z.ZodDefault
+      fieldSchema instanceof z.ZodDefault ||
+      fieldSchema instanceof z.ZodPrefault ||
+      fieldSchema instanceof z.ZodReadonly ||
+      fieldSchema instanceof z.ZodNonOptional
     ) {
-      fieldSchema = fieldSchema._def.innerType;
+      fieldSchema = fieldSchema.unwrap();
     }
     if (fieldSchema instanceof z.ZodDate && typeof value === "string") {
       transformed[key] = new Date(value);

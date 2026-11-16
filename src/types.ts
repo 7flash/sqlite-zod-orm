@@ -7,7 +7,7 @@
 import { z } from "zod";
 import type { QueryBuilder } from "./query";
 
-export type ZodType = z.ZodTypeAny;
+export type ZodType = z.ZodType;
 export type SchemaMap = Record<string, z.ZodType<any>>;
 export type ViewSchemaMap = Record<string, z.ZodType<any>>;
 
@@ -163,6 +163,16 @@ export type EntityData<S extends z.ZodType<any>> = Omit<InputSchema<S>, "id">;
 /** Strip `_id` suffix: `'author_id'` → `'author'` */
 type StripIdSuffix<S extends string> = S extends `${infer Base}_id` ? Base : S;
 
+/** Mirror runtime naming: preserve schema fields and entity methods. */
+type NavigationName<
+  S extends z.ZodType<any>,
+  Name extends string,
+> = string extends keyof z.infer<S>
+  ? Name
+  : Name extends keyof z.infer<S> | "id" | "update" | "delete" | "createdAt" | "updatedAt" | "deletedAt"
+    ? NavigationName<S, `${Name}Relation`>
+    : Name;
+
 /**
  * Base entity type with schema fields, id, update(), delete().
  * No nav methods — those are added by NavMethods.
@@ -184,7 +194,7 @@ type BelongsToNav<
 > = Table extends keyof R
   ? {
       readonly [
-        FK in Extract<keyof R[Table], string> as StripIdSuffix<FK>
+        FK in Extract<keyof R[Table], string> as NavigationName<S[Table & keyof S], StripIdSuffix<FK>>
       ]: R[Table][FK] extends keyof S
         ? () => BaseEntity<S[R[Table][FK]]> | null
         : never;
@@ -208,7 +218,7 @@ type HasManyNav<
       R[ChildTable],
       ParentTable
     > extends true
-      ? ChildTable
+      ? NavigationName<S[ParentTable & keyof S], ChildTable>
       : never
   ]: () => BaseEntity<S[ChildTable]>[];
 };

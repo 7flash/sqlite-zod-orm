@@ -27,7 +27,7 @@ function withFile(work: (file: string) => void) {
   }
 }
 
-test("defaulted and nullable additions preserve table, rows, indexes, triggers and defaults on reopen", () =>
+test("additive changes rebuild with preserved ids, indexes, triggers and defaults on reopen", () =>
   withFile((file) => {
     const original = new Database(
       file,
@@ -44,10 +44,7 @@ test("defaulted and nullable additions preserve table, rows, indexes, triggers a
       "CREATE TRIGGER app_revision AFTER UPDATE ON deployments BEGIN UPDATE revisions SET value = value + 1; END",
     );
     const before = original.raw(
-      "SELECT name, rootpage, sql FROM sqlite_master WHERE tbl_name = 'deployments' AND type IN ('index', 'trigger') ORDER BY name",
-    );
-    const rootpage = original.raw(
-      "SELECT rootpage FROM sqlite_master WHERE name = 'deployments'",
+      "SELECT name, sql FROM sqlite_master WHERE tbl_name = 'deployments' AND type IN ('index', 'trigger') ORDER BY name",
     );
     original.close();
     const schemas = {
@@ -67,19 +64,18 @@ test("defaulted and nullable additions preserve table, rows, indexes, triggers a
       try {
         expect(
           db.raw(
-            "SELECT rootpage FROM sqlite_master WHERE name = 'deployments'",
-          ),
-        ).toEqual(rootpage);
-        expect(
-          db.raw(
-            "SELECT name, rootpage, sql FROM sqlite_master WHERE tbl_name = 'deployments' AND type IN ('index', 'trigger') ORDER BY name",
+            "SELECT name, sql FROM sqlite_master WHERE tbl_name = 'deployments' AND type IN ('index', 'trigger') ORDER BY name",
           ),
         ).toEqual(before);
         expect(
-          db.raw(
-            "SELECT name FROM sqlite_master WHERE name LIKE 'deployments_v%'",
-          ),
-        ).toEqual([]);
+          db.raw("SELECT name FROM sqlite_master WHERE name LIKE 'deployments_v%'"),
+        ).toEqual([{ name: "deployments_v1" }]);
+        expect(db.raw("SELECT * FROM deployments_v1")).toEqual([
+          { id: 1, name: "live" },
+        ]);
+        expect(db.raw(
+          "SELECT name FROM sqlite_master WHERE tbl_name = 'deployments_v1' AND type IN ('index', 'trigger')",
+        )).toEqual([]);
         const row = db.deployments.get(1)!;
         expect(row.decisionLinesJson).toBe("[]");
         expect(row.enabled).toBe(true);
@@ -334,4 +330,87 @@ test("function defaults are evaluated once per added column and not on reopen", 
         db.close();
       }
     }
+  }));
+
+test("inline UNIQUE constraints survive rebuild as live indexes", () =>
+  withFile((file) => {
+    const raw = new RawDatabase(file);
+    raw.run('CREATE TABLE authors (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE)');
+    raw.run("INSERT INTO authors (name) VALUES ('a')");
+    raw.close();
+    const db = new Database(file, {
+      authors: z.object({ name: z.string(), nickname: z.string().default("-") }),
+    });
+    try {
+      expect(db.authors.get(1)?.nickname).toBe("-");
+      expect(db.raw("SELECT id, name FROM authors_v1")).toEqual([{ id: 1, name: "a" }]);
+      expect(() => db.authors.insert({ name: "a", nickname: "duplicate" })).toThrow();
+      expect(db.raw("SELECT tbl_name FROM sqlite_master WHERE name = 'uq_rebuilt_authors_1'")).toEqual([
+        { tbl_name: "authors" },
+      ]);
+      expect(db.raw("PRAGMA foreign_key_check")).toEqual([]);
+    } finally {
+      db.close();
+    }
+  }));
+
+test("additive reconstruction retains incoming/outgoing FKs and dependent views", () =>
+  withFile((file) => {
+    const options = {
+      relations: { children: { parent_id: "parents" } },
+      indexes: { children: ["parent_id"] },
+      views: {
+        named_parents: {
+          schema: z.object({ name: z.string() }),
+          as: "SELECT name FROM parents",
+        },
+      },
+    };
+    const initial = new Database(file, {
+      parents: z.object({ name: z.string() }),
+      children: z.object({ parent_id: z.number(), label: z.string() }),
+    }, options);
+    initial.parents.insert({ name: "p" });
+    initial.children.insert({ parent_id: 1, label: "c" });
+    initial.close();
+    const db = new Database(file, {
+      parents: z.object({ name: z.string(), enabled: z.boolean().default(true) }),
+      children: z.object({ parent_id: z.number(), label: z.string(), note: z.string().default("ok") }),
+    }, options);
+    try {
+      expect(db.parents.get(1)?.enabled).toBe(true);
+      expect(db.children.get(1)?.note).toBe("ok");
+      expect(db.children.get(1)?.parent_id).toBe(1);
+      expect(db.raw("PRAGMA foreign_key_list(children)")[0]).toMatchObject({ table: "parents", from: "parent_id" });
+      expect(db.raw("PRAGMA foreign_key_check")).toEqual([]);
+      expect(db.named_parents.select().all()).toEqual([{ name: "p" }]);
+      expect(db.raw("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'children'")).toEqual([
+        { name: "idx_children_parent_id" },
+      ]);
+      expect(db.raw("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'children_v1'")).toEqual([]);
+      expect(db.raw("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'parents_v1'")).toEqual([]);
+    } finally { db.close(); }
+  }));
+
+test("an invalid dependent view aborts a rebuild without changing live objects", () =>
+  withFile((file) => {
+    const original = new Database(file, {
+      records: z.object({ name: z.string(), obsolete: z.string() }),
+    });
+    original.records.insert({ name: "live", obsolete: "required-by-view" });
+    original.exec("CREATE VIEW app_view AS SELECT obsolete FROM records");
+    original.close();
+    expect(() => new Database(file, {
+      records: z.object({ name: z.string() }),
+    })).toThrow();
+    const raw = new RawDatabase(file);
+    try {
+      expect(raw.query("SELECT obsolete FROM app_view").all()).toEqual([
+        { obsolete: "required-by-view" },
+      ]);
+      expect(raw.query("SELECT * FROM records").all()).toEqual([
+        { id: 1, name: "live", obsolete: "required-by-view" },
+      ]);
+      expect(raw.query("SELECT name FROM sqlite_master WHERE name = 'records_v1'").all()).toEqual([]);
+    } finally { raw.close(); }
   }));

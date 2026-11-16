@@ -122,8 +122,12 @@ class _Database<Schemas extends SchemaMap> {
    * When debug is off, executes fn directly with zero overhead.
    */
   private _m<T>(label: string, fn: () => T): T {
-    if (this._debug) return this._measure.measureSync.assert(label, fn);
-    return fn();
+    if (!this._debug) return fn();
+    // measure-fn 5 rejects potentially Promise-like generic return types.
+    // ORM operations here are synchronous; erase T only at the instrumentation
+    // boundary and preserve its result type. Without a catch action, sync()
+    // rethrows the original callback exception.
+    return this._measure.sync<unknown>(label, fn) as T;
   }
 
   constructor(
@@ -219,6 +223,14 @@ class _Database<Schemas extends SchemaMap> {
             const violations = this.db.query("PRAGMA foreign_key_check").all();
             if (violations.length)
               throw new Error("Schema sync would leave foreign key violations");
+            // Views are stored as SQL text. Check dependent view resolution
+            // before the transaction commits, rather than leaving broken views.
+            const views = this.db.query(
+              "SELECT name FROM sqlite_master WHERE type = 'view'",
+            ).all() as { name: string }[];
+            for (const view of views) {
+              this.db.query(`SELECT * FROM "${this.escapeIdentifier(view.name)}" LIMIT 0`).all();
+            }
           }
         })
         .immediate();
@@ -412,89 +424,9 @@ class _Database<Schemas extends SchemaMap> {
   }
 
   private syncExistingTable(entityName: string, schema: z.ZodType<any>): void {
-    const q = (name: string) => `"${this.escapeIdentifier(name)}"`;
-    type Column = { name: string; type: string; pk: number; notnull: number };
-    const existing = this.db
-      .query(`PRAGMA table_info(${q(entityName)})`)
-      .all() as Column[];
-    const fields = getStorableFields(schema);
-    const expected = new Map([
-      ["id", "INTEGER"],
-      ...fields.map(
-        (f) => [f.name, zodTypeToSqlType(f.type)] as [string, string],
-      ),
-      ...(this._timestamps
-        ? ([
-            ["createdAt", "TEXT"],
-            ["updatedAt", "TEXT"],
-          ] as [string, string][])
-        : []),
-      ...(this._softDeletes
-        ? ([["deletedAt", "TEXT"]] as [string, string][])
-        : []),
-    ]);
-    const foreignKeys = this.db
-      .query(`PRAGMA foreign_key_list(${q(entityName)})`)
-      .all() as {
-      table: string;
-      from: string;
-      to: string;
-      on_delete: string;
-      on_update: string;
-      seq: number;
-    }[];
-    const relations = this.relationships.filter(
-      (r) => r.type === "belongs-to" && r.from === entityName,
-    );
-    const sameForeignKeys =
-      foreignKeys.length === relations.length &&
-      foreignKeys.every(
-        (fk) =>
-          fk.seq === 0 &&
-          fk.to === "id" &&
-          fk.on_delete === "SET NULL" &&
-          fk.on_update === "NO ACTION" &&
-          relations.some((r) => r.foreignKey === fk.from && r.to === fk.table),
-      );
-    if (
-      !sameForeignKeys ||
-      !existing.some((c) => c.name === "id" && c.pk === 1) ||
-      existing.some(
-        (c) =>
-          expected.get(c.name) !== c.type.toUpperCase() ||
-          c.pk !== (c.name === "id" ? 1 : 0),
-      )
-    ) {
-      this.backupAndRecreateTable(entityName, schema);
-      return;
-    }
-    const names = new Set(existing.map((c) => c.name));
-    const added = [...expected].filter(([name]) => !names.has(name));
-    const defaults = new Map<string, any>();
-    for (const [name] of added) {
-      const field = fields.find((f) => f.name === name);
-      const parsed = field?.type.safeParse(undefined);
-      defaults.set(
-        name,
-        parsed?.success
-          ? transformForStorage({ value: parsed.data }).value
-          : null,
-      );
-      if (field && !parsed?.success && !field.type.isNullable()) {
-        this.backupAndRecreateTable(entityName, schema);
-        return;
-      }
-    }
-    for (const [name, type] of added) {
-      const value = defaults.get(name);
-      const defaultSql =
-        value === undefined || value === null
-          ? ""
-          : ` DEFAULT ${this.sqlLiteral(value)}`;
-      this.db.run(
-        `ALTER TABLE ${q(entityName)} ADD COLUMN ${q(name)} ${type}${defaultSql}`,
-      );
-    }
+    // Schema changes always reconstruct the table, including additive changes.
+    // A snapshot and replacement keep schema objects attached to the live name.
+    this.backupAndRecreateTable(entityName, schema);
   }
 
   private sqlLiteral(value: any): string {
@@ -549,13 +481,42 @@ class _Database<Schemas extends SchemaMap> {
     const q = (name: string) => `"${this.escapeIdentifier(name)}"`;
     const objects = this.db
       .query(
-        "SELECT sql FROM sqlite_master WHERE tbl_name = ? AND type IN ('index', 'trigger')",
+        "SELECT name, type, sql FROM sqlite_master WHERE tbl_name = ? AND type IN ('index', 'trigger')",
       )
-      .all(entityName) as { sql: string | null }[];
-    if (objects.some((object) => object.sql === null))
-      throw new Error(
-        `Cannot automatically rebuild "${entityName}" with inline UNIQUE constraints; use an explicit migration.`,
-      );
+      .all(entityName) as { name: string; type: string; sql: string | null }[];
+    // SQLite autoindexes for inline UNIQUE constraints have null sqlite_master.sql.
+    // Reconstitute those constraints as named unique indexes on the replacement.
+    const inlineIndexes = (
+      this.db.query(`PRAGMA index_list(${q(entityName)})`).all() as {
+        name: string;
+        origin: string;
+        unique: number;
+      }[]
+    ).filter((index) => index.origin === "u");
+    const restoredUnique = inlineIndexes.map((index, offset) => {
+      const fields = this.db.query(`PRAGMA index_xinfo(${q(index.name)})`).all() as {
+        cid: number;
+        name: string | null;
+        coll: string;
+        desc: number;
+        key: number;
+      }[];
+      const keys = fields.filter((column) => column.key === 1);
+      if (keys.length === 0 || keys.some((column) => column.cid < 0 || !column.name)) {
+        throw new Error(`Cannot automatically reconstruct inline index '${index.name}'.`);
+      }
+      const name = `uq_rebuilt_${entityName}_${offset + 1}`;
+      if (this.objectExists(name) && !objects.some((object) => object.name === name)) {
+        throw new Error(`Rebuild index '${name}' conflicts with an existing schema object.`);
+      }
+      const sql = `CREATE UNIQUE INDEX ${q(name)} ON ${q(entityName)} (` +
+        keys.map((column) => `${q(column.name!)} COLLATE ${q(column.coll)}${column.desc ? " DESC" : ""}`).join(", ") +
+        ")";
+      return { name, sql };
+    });
+    if (objects.some((object) => object.sql === null && !inlineIndexes.some((index) => index.name === object.name))) {
+      throw new Error(`Cannot reconstruct an unnamed index on '${entityName}'.`);
+    }
     const oldColumns = new Set(
       (
         this.db.query(`PRAGMA table_info(${q(entityName)})`).all() as {
@@ -612,11 +573,12 @@ class _Database<Schemas extends SchemaMap> {
         this.db
           .query("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = ?")
           .run(sequence.seq, entityName);
-      for (const object of objects) this.db.run(object.sql!);
+      for (const object of objects) if (object.sql) this.db.run(object.sql);
+      for (const index of restoredUnique) this.db.run(index.sql);
     });
     txn();
     this._schemaRebuildLogs.push(
-      `[sqlite-zod-orm] Rebuilt "${entityName}"; copied rows from "${backupName}" and recreated ${objects.length} indexes/triggers.`,
+      `[sqlite-zod-orm] Rebuilt "${entityName}" from "${backupName}"; preserved ids, copied shared columns, and restored ${objects.filter((object) => object.sql).length + restoredUnique.length} indexes/triggers.`,
     );
   }
 

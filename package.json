@@ -1,23 +1,25 @@
 {
   "name": "sqlite-zod-orm",
-  "version": "3.33.0",
+  "version": "3.34.0",
   "description": "Type-safe SQLite ORM for Bun — Zod schemas, fluent queries, auto relationships, zero SQL",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
-  "types": "./src/index.ts",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./src/index.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     }
   },
   "scripts": {
-    "build": "bun build ./src/index.ts --outdir ./dist --target bun --format esm",
+    "build": "bun build ./src/index.ts --outdir ./dist --target bun --format esm && tsc -p tsconfig.build.json",
     "clean": "rm -rf dist",
     "test": "bun test",
     "bench": "bun bench/triggers-vs-naive.ts && bun bench/poll-strategy.ts && bun bench/indexes.ts",
-    "prepublishOnly": "bun run build"
+    "prepublishOnly": "bun run build",
+    "test:types": "bun run build && bun run scripts/check-package-types.ts",
+    "check": "tsc -p tsconfig.json --noEmit && bun test && bun run test:types"
   },
   "files": [
     "src",
@@ -43,14 +45,16 @@
     "url": "git@github.com:7flash/sqlite-zod-orm.git"
   },
   "devDependencies": {
-    "bun-types": "latest"
+    "@types/node": "26",
+    "bun-types": "^1.4.3",
+    "typescript": "^7.0.2"
   },
   "peerDependencies": {
-    "typescript": "^5.0.0"
+    "typescript": ">=5.8.3 <8"
   },
   "dependencies": {
-    "measure-fn": "^3.10.0",
-    "zod": "^3.25.67"
+    "measure-fn": "^5.3.1",
+    "zod": "^4.6.7"
   },
   "engines": {
     "bun": ">=1.0.0"

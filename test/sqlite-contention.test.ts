@@ -55,6 +55,9 @@ describe("SQLite process contention", () => {
     seed.counters.insert({ value: 0 });
     seed.close();
     const children: Awaited<ReturnType<typeof startWorker>>[] = [];
+    const rebuildWarnings: string[] = [];
+    const expectedRebuildWarning =
+      '[sqlite-zod-orm] Rebuilt "counters" from "counters_v1"; preserved ids, copied shared columns, and restored 3 indexes/triggers.';
     try {
       for (let i = 0; i < 8; i++)
         children.push(await startWorker(file, "increment"));
@@ -63,10 +66,15 @@ describe("SQLite process contention", () => {
         child.stdin.end();
       }
       for (const child of children) {
-        const error = await new Response(child.stderr).text();
-        expect(error).toBe("");
+        const stderr = await new Response(child.stderr).text();
+        const lines = stderr.split(/\r?\n/).filter((line) => line.length > 0);
+        // Only the worker that performed the migration may emit this warning.
+        // Any unrelated stderr, including worker errors, must fail this test.
+        for (const line of lines) expect(line).toBe(expectedRebuildWarning);
+        rebuildWarnings.push(...lines);
         expect(await child.exited).toBe(0);
       }
+      expect(rebuildWarnings).toEqual([expectedRebuildWarning]);
       const raw = new RawDatabase(file);
       try {
         expect(raw.query("SELECT value, label FROM counters").get()).toEqual({
@@ -79,7 +87,10 @@ describe("SQLite process contention", () => {
               "SELECT name FROM sqlite_master WHERE name LIKE 'counters_v%'",
             )
             .all(),
-        ).toEqual([]);
+        ).toEqual([{ name: "counters_v1" }]);
+        expect(raw.query("SELECT id, value FROM counters_v1").all()).toEqual([
+          { id: 1, value: 0 },
+        ]);
         expect(
           raw
             .query("SELECT COUNT(*) AS n FROM _changes WHERE op = 'update'")

@@ -41,15 +41,16 @@ const db = new Database('app.db', {
 
 Tables are auto-created and auto-migrated from your Zod schemas. No SQL required.
 
-New optional, nullable, or defaulted fields use `ALTER TABLE ADD COLUMN`, preserving
-rows, indexes and triggers. Defaults are evaluated once during migration and stored
-in SQLite format (including JSON and booleans). Column order changes do not rebuild
-tables. Incompatible changes retain a `table_vN` snapshot, copy shared columns and
-recreate existing indexes and triggers in one transaction, with a rebuild warning
-after commit. If an index cannot be recreated, or a new required field cannot be
-populated, initialization rolls back; use an explicit migration for those changes.
-Rebuilds involving inline `UNIQUE` constraints also require an explicit migration.
-Historical backup tables are retained for deliberate recovery through `db.migrator()`.
+Schema changes (including added fields) reconstruct affected tables in a
+transaction. Each rebuild retains a `table_vN` data snapshot, preserves row IDs
+and existing column values, initializes added nullable/defaulted fields, and
+recreates indexes and triggers on the live table. Inline column `UNIQUE`
+constraints are reconstructed as named unique indexes. Declared relationships,
+incoming foreign-key references and existing views remain directed at the live
+table. If a required field cannot be populated, an index cannot be recreated,
+foreign keys fail validation, or a dependent view becomes invalid, initialization
+rolls back instead of committing a partial migration. Historical snapshots are
+available for explicit recovery through `db.migrator()`.
 
 All startup schema work (tables, indexes, unique constraints, views and change
 tracking) runs under `BEGIN IMMEDIATE`. SQLite waits for locks before WAL or schema
@@ -104,9 +105,9 @@ db.users.select().whereRaw('score > ? AND name != ?', [50, 'Bot']).all();
 ```typescript
 // Navigation (lazy, proxy-based)
 const post = db.posts.get(1);
-post.user;           // → related user object
+post.user();         // → related user object
 const user = db.users.get(1);
-user.posts;          // → array of user's posts
+user.posts();        // → array of user's posts
 
 // Eager loading (no N+1)
 db.posts.select().with('user').all();
@@ -155,6 +156,16 @@ const db = new Database(':memory:', { users: UserSchema }, {
 });
 user.fullName; // 'Alice Smith' — recomputes on access
 ```
+
+### Relationship accessor names
+
+Navigation accessors strip a trailing `_id` (`author_id` becomes `author()`).
+If that name is a stored schema field or an entity method (`id`, `update`,
+`delete`), `Relation` is appended until the name is available. For example,
+`agentRef` stays numeric and its parent is accessed with `agentRefRelation()`.
+Inverse accessors follow the same rule: a stored `books` field is preserved
+and children are accessed with `booksRelation()`. Two relations resolving to
+the same accessor are rejected during initialization.
 
 ## Cascade Deletes
 
@@ -261,7 +272,7 @@ db.exec('UPDATE users SET score = 0 WHERE role = ?', 'guest');
 ## Full Feature List
 
 - Zod-powered schema definition & runtime validation
-- Auto table creation & migration (add columns)
+- Auto table creation & transactional reconstructive migrations
 - Fluent query builder with 10+ operators
 - Type-safe select narrowing
 - Relationship navigation (lazy proxy + eager loading)
@@ -293,14 +304,27 @@ SatiDB is opinionated by design. Before proposing new features, understand what 
 | Query middleware | `measure-fn` handles observability, `hooks` handle lifecycle |
 | Cursor pagination | Offset pagination covers SQLite's single-process use case |
 | Schema introspection API | Zod schemas are compile-time known — runtime reflection invites dynamic queries |
-| Migration CLI | Auto-migration handles additive changes; use `db.exec()` for destructive ones |
+| Automatic destructive data mappings | Rebuilds preserve shared columns; use the migration CLI for explicit remapping |
 
 **The rule:** if the query builder can already do it, don't add a new API surface for it.
 
 ## Requirements
 
 - **Bun** ≥ 1.0 (uses `bun:sqlite` native bindings)
-- **Zod** ≥ 3.0
+- **Zod** ≥ 4.6.7
+
+## Development checks
+
+Run `bun run check` for strict source TypeScript validation, the full runtime
+suite, and a packed consumer check with `strictFunctionTypes: true` and
+`skipLibCheck: false`. The consumer verifies numeric FK fields, projected scalar
+reads, debug-mode error propagation, and an independent measure-fn 5.3.1 import.
+
+The ORM uses measure-fn 5.x and Zod 4.x at runtime. Development requires
+TypeScript 7.x and current Bun types. Published types remain generated in
+`dist/*.d.ts`, but declaration generation performs full type checking: it does
+not use `noCheck` to conceal implementation errors. Regenerate `bun.lock` with
+`bun install` after upgrading dependencies.
 
 ## License
 
