@@ -231,6 +231,9 @@ class _Database<Schemas extends SchemaMap> {
             for (const view of views) {
               this.db.query(`SELECT * FROM "${this.escapeIdentifier(view.name)}" LIMIT 0`).all();
             }
+            // Preparing EXPLAIN compiles trigger bodies, including triggers on
+            // unrelated tables and INSTEAD OF triggers on views, without DML.
+            this.validateTriggers();
           }
         })
         .immediate();
@@ -580,6 +583,138 @@ class _Database<Schemas extends SchemaMap> {
     this._schemaRebuildLogs.push(
       `[sqlite-zod-orm] Rebuilt "${entityName}" from "${backupName}"; preserved ids, copied shared columns, and restored ${objects.filter((object) => object.sql).length + restoredUnique.length} indexes/triggers.`,
     );
+  }
+
+  /** Prepare and step an EXPLAIN without caching it, then finalize it, so no
+   *  statement is left in progress when the savepoint or transaction ends. */
+  private compileOnly(sql: string): void {
+    const stmt = this.db.prepare(sql);
+    try {
+      stmt.all();
+    } finally {
+      stmt.finalize();
+    }
+  }
+
+  /** Check all schema triggers after a rebuild, before the outer commit. */
+  private validateTriggers(): void {
+    type Event = "INSERT" | "UPDATE" | "DELETE";
+    type Trigger = { name: string; tbl_name: string; sql: string };
+    const triggers = this.db.query(
+      "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name",
+    ).all() as Trigger[];
+    const q = (name: string) => `"${this.escapeIdentifier(name)}"`;
+    const rowidTables = new Set(
+      (this.db.query("PRAGMA table_list").all() as {
+        schema: string; name: string; type: string; wr: number;
+      }[]).filter((table) => table.schema === "main" && table.type === "table" && !table.wr)
+        .map((table) => table.name.toLowerCase()),
+    );
+    const checks: { trigger: Trigger; event: Event; explain: string }[] = [];
+
+    for (const trigger of triggers) {
+      // Tokenize the CREATE TRIGGER header so quoted names and comments cannot
+      // be mistaken for the event keyword (SQLite has no trigger-list PRAGMA).
+      const tokens = (trigger.sql.match(
+        /--[^\r\n]*|\/\*[\s\S]*?\*\/|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|'(?:[^']|'')*'|[A-Za-z_][\w$]*|[^\s]/g,
+      ) ?? []).filter(
+        (token) => !token.startsWith("--") && !token.startsWith("/*"),
+      );
+      const word = (index: number) => tokens[index]?.toUpperCase();
+      let i = 0;
+      if (word(i++) !== "CREATE")
+        throw new Error(`Invalid trigger definition: ${trigger.name}`);
+      if (word(i) === "TEMP" || word(i) === "TEMPORARY") i++;
+      if (word(i++) !== "TRIGGER")
+        throw new Error(`Invalid trigger definition: ${trigger.name}`);
+      if (word(i) === "IF") i += 3; // IF NOT EXISTS
+      i++; // trigger identifier
+      if (tokens[i] === ".") i += 2; // optional schema qualifier
+      if (word(i) === "BEFORE" || word(i) === "AFTER") i++;
+      else if (word(i) === "INSTEAD" && word(i + 1) === "OF") i += 2;
+      const event = word(i) as Event;
+      if (event !== "INSERT" && event !== "UPDATE" && event !== "DELETE")
+        throw new Error(`Cannot determine event for trigger "${trigger.name}"`);
+
+      const columns = this.db
+        .query(`PRAGMA table_xinfo(${q(trigger.tbl_name)})`)
+        .all() as { name: string; hidden: number }[];
+      const writable = columns.filter((col) => col.hidden === 0).map((col) => col.name);
+      // UPDATE OF rowid/oid/_rowid_ is valid on ordinary rowid tables.
+      if (rowidTables.has(trigger.tbl_name.toLowerCase())) {
+        for (const alias of ["rowid", "oid", "_rowid_"]) {
+          if (!writable.some((name) => name.toLowerCase() === alias))
+            writable.push(alias);
+        }
+      }
+      if (event === "UPDATE" && word(i + 1) === "OF") {
+        const known = new Set(writable.map((name) => name.toLowerCase()));
+        for (let j = i + 2; j < tokens.length && word(j) !== "ON"; j++) {
+          if (tokens[j] === ",") continue;
+          const token = tokens[j]!;
+          const column = token.startsWith('"') || token.startsWith("`")
+            ? token.slice(1, -1).replaceAll(token[0]! + token[0]!, token[0]!)
+            : token.startsWith("[")
+              ? token.slice(1, -1)
+              : token;
+          if (!known.has(column.toLowerCase()))
+            throw new Error(
+              `Invalid trigger "${trigger.name}": no such column: ${column}`,
+            );
+        }
+      }
+
+      const table = q(trigger.tbl_name);
+      const explain =
+        event === "INSERT"
+          ? `EXPLAIN INSERT INTO ${table} DEFAULT VALUES`
+          : event === "DELETE"
+            ? `EXPLAIN DELETE FROM ${table} WHERE 0`
+            : `EXPLAIN UPDATE ${table} SET ${writable
+                .map((name) => `${q(name)} = ${q(name)}`)
+                .join(", ")} WHERE 0`;
+      checks.push({ trigger, event, explain });
+    }
+
+    // One EXPLAIN per table/event normally compiles all relevant triggers.
+    const checked = new Set<string>();
+    for (const check of checks) {
+      const key = `${check.trigger.tbl_name.toLowerCase()}\0${check.event}`;
+      if (checked.has(key)) continue;
+      try {
+        this.compileOnly(check.explain);
+      } catch (error) {
+        // EXPLAIN also compiles nested triggers, so its error alone cannot
+        // identify the broken one. Temporarily isolate each trigger under a
+        // savepoint; restoring the savepoint leaves the schema untouched.
+        for (const candidate of checks) {
+          this.db.run("SAVEPOINT orm_trigger_check");
+          let failure: unknown;
+          try {
+            for (const other of checks) {
+              if (other !== candidate)
+                this.db.run(`DROP TRIGGER ${q(other.trigger.name)}`);
+            }
+            this.compileOnly(candidate.explain);
+          } catch (cause) {
+            failure = cause;
+          } finally {
+            this.db.run("ROLLBACK TO orm_trigger_check");
+            this.db.run("RELEASE orm_trigger_check");
+          }
+          if (failure) {
+            throw new Error(
+              `Invalid trigger "${candidate.trigger.name}": ${String(failure)}`,
+              { cause: failure },
+            );
+          }
+        }
+        throw new Error(`Trigger validation failed: ${String(error)}`, {
+          cause: error,
+        });
+      }
+      checked.add(key);
+    }
   }
 
   private nextBackupTableName(tableName: string): string {
