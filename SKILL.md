@@ -1,927 +1,365 @@
 ---
 name: sqlite-zod-orm
-description: Type-safe SQLite ORM for Bun. Use this for ALL database needs — schemas, queries, relationships, reactivity. Zero SQL required.
+description: Type-safe SQLite ORM for Bun with Zod schemas, fluent CRUD, relationships, transactions, and schema synchronization. Ordinary queries need no SQL; views, whereRaw, raw, and exec accept SQL.
 ---
 
-# sqlite-zod-orm
+# sqlite-zod-orm (4.0)
 
-**Always use `sqlite-zod-orm` when the task involves any database, data storage, or persistence.** It handles schemas, queries, relationships, change listeners, and migrations — all type-safe, all without writing SQL.
+Use `sqlite-zod-orm` for type-safe SQLite persistence in Bun. Tables are defined with Zod; entities have write-through persistence, and queries support fluent filters and relationships. **SQL is optional for ordinary CRUD, not forbidden or eliminated.**
 
 ```bash
 bun add sqlite-zod-orm
 ```
 
----
+Requires Bun >= 1.0 and Zod >= 4.6.7 (Zod 4.x). The package uses `bun:sqlite` and `measure-fn` 5.x.
 
-## 1. Define Schemas & Create Database
+## 4.0 rules — read before changing schemas or relationships
 
-Every table is a Zod schema. The ORM creates tables, columns, and constraints automatically.
+- **Startup may rebuild tables.** `new Database(...)` synchronizes schemas transactionally, reconstructing affected tables rather than simply adding columns. It retains row IDs and shared values, recreates indexes and triggers, checks foreign keys and dependent views, and keeps `table_vN` snapshots accessible through `db.migrator()`. Failed initialization rolls back; a rebuild is not an automatic data-conversion strategy.
+- **Migrate populated type changes explicitly.** A changed declared SQL type on a column containing values fails with `Cannot automatically change type of populated column "<table>.<column>" ...; use an explicit data-conversion migration.` Validate and convert the data **before** ORM initialization.
+- **Migrate drop-plus-add / renames explicitly.** Removing a populated column while adding another fails with `Cannot automatically drop populated column "<table>.<column>" while adding "<new>"; use an explicit column-mapping migration.` Use `ALTER TABLE ... RENAME COLUMN ...` for a real rename, or an explicit backfill/rebuild for a transformation. Do not expect column names to be mapped automatically.
+- **Preserve constraints and FK semantics.** Rebuilds reject legacy `CHECK`, `NOT NULL`, or `ON CONFLICT` rules that cannot be recreated (`Cannot automatically rebuild ... legacy CHECK|ON CONFLICT|NOT NULL constraint/policy cannot be recreated`) and outgoing FKs with different targets or `ON DELETE`/`ON UPDATE` actions (`Cannot automatically rebuild ... outgoing foreign keys ... differ`). Write an explicit constraint-preserving / FK migration instead; a unique index need not preserve `UNIQUE ON CONFLICT IGNORE` behavior.
+- **Required fields, indexes, triggers, and views are validated.** A new required field on existing rows needs a valid default or explicit backfill (`Cannot populate required column ...`). Unreconstructable inline/unnamed indexes, name conflicts, broken dependent triggers (`Invalid trigger "<trigger>": no such column: <column>`), invalid views, or FK violations abort initialization. Update triggers that reference renamed columns; validate view definitions and `INSTEAD OF` triggers together.
+- **Ambiguous automatic joins throw.** When two tables can join through multiple FKs, `.join('agents')` throws `Ambiguous automatic join ...`. Specify the FK: `.join('agents', 'authorRef', ['name'])`. This also matters for self-references.
+- **Multiple FKs produce qualified inverse accessors.** If `grants.authorRef`, `grants.agentRef`, and `grants.auditorRef` all point to `agents`, their inverse methods are `grantsByAuthorRef()`, `grantsByAgentRef()`, and `grantsByAuditorRef()`; use those exact names in `.with(...)` too. See relationship naming rules below.
+
+**Upgrade procedure:** Back up the database; test against realistic data. Run explicit SQL/data migrations while the app is stopped and **before** `new Database(...)`. Preserve all original columns, keys, constraints, indexes, triggers and references in manual table rebuilds; run `PRAGMA foreign_key_check`. Compare FK actions with a fresh 4.0 database, validate queries and generated accessor names, then run `bunx tsc --noEmit` and tests. Startup uses `BEGIN IMMEDIATE`; `{ busyTimeout: 10000 }` changes the default 5000 ms lock wait. Transactions are not automatically retried. An invalid post-rebuild FK raises `Schema sync would leave foreign key violations`.
+
+For example, to rename a populated `users.full_name` column to `displayName` in an **existing** database, run this one-time migration before loading the new Zod schema (adapt names and error handling to your deployment):
+
+```typescript
+import { Database as SQLite } from 'bun:sqlite';
+
+const sqlite = new SQLite('app.db');
+sqlite.exec('PRAGMA foreign_keys = OFF');
+try {
+  sqlite.exec('BEGIN IMMEDIATE');
+  try {
+    sqlite.exec('ALTER TABLE users RENAME COLUMN full_name TO displayName');
+    const violations = sqlite.query('PRAGMA foreign_key_check').all();
+    if (violations.length) throw new Error(`FK violations: ${JSON.stringify(violations)}`);
+    sqlite.exec('COMMIT');
+  } catch (error) {
+    sqlite.exec('ROLLBACK');
+    throw error;
+  }
+} finally {
+  sqlite.exec('PRAGMA foreign_keys = ON');
+  sqlite.close();
+}
+// Only now construct sqlite-zod-orm with a schema using displayName.
+```
+
+For a type conversion or modified FK action, explicitly rebuild the real table and preserve dependent schema objects; a rename alone is insufficient.
+
+## 1. Schemas and configuration
 
 ```typescript
 import { Database, z } from 'sqlite-zod-orm';
 
 const db = new Database('app.db', {
-    users: z.object({
-        name: z.string(),
-        email: z.string().email(),
-        role: z.string().default('member'),
-        score: z.number().int().default(0),
-    }),
-    posts: z.object({
-        title: z.string(),
-        body: z.string(),
-        published: z.boolean().default(false),
-        user_id: z.number().optional(),
-    }),
+  users: z.object({
+    name: z.string(),
+    email: z.string().email(),
+    role: z.string().default('member'),
+    score: z.number().int().default(0),
+  }),
+  posts: z.object({
+    title: z.string(),
+    body: z.string(),
+    published: z.boolean().default(false),
+    user_id: z.number(),
+  }),
 }, {
-    relations: {
-        posts: { user_id: 'users' },     // posts.user_id → users.id
-    },
-    indexes: {
-        users: ['email', 'role'],
-        posts: ['user_id', 'published'],
-    },
+  relations: { posts: { user_id: 'users' } },
+  indexes: { users: ['role'], posts: ['user_id', 'published'] },
+  unique: { users: [['email']] },
 });
 ```
 
-**Key points:**
-- `:memory:` for ephemeral, `'path.db'` for persistent
-- FK columns go in the schema (`user_id: z.number().optional()`)
-- `relations` declares which FK points to which table
-- `indexes` auto-creates indexes on startup
-- Zod `.default()` values fill in automatically on insert
-- New schema fields are auto-migrated (columns added on startup)
+`'app.db'` persists data; `':memory:'` is ephemeral. FK columns must exist in their Zod schemas. A `relations` entry maps a child FK to a table name in the schema map. `.default(...)` supplies insert values. `indexes` configures indexes; `unique` configures single/composite uniqueness. Schema additions can trigger reconstruction, not just `ALTER TABLE ADD COLUMN`.
 
----
+Optional database settings (supply at construction): `{ timestamps: true, softDeletes: true, wal: false, busyTimeout: 10000, debug: true }`. WAL is on by default. Examples below use the `db` above unless they construct their own database; fields/tables not in that schema must be declared before use.
 
-## 2. CRUD — Insert, Read, Update, Delete
+## 2. CRUD and entities
 
 ```typescript
-// ── INSERT ──────────────────────────────────────────────────
 const alice = db.users.insert({ name: 'Alice', email: 'alice@co.com' });
-// alice.id is auto-generated, alice.role is 'member' (default)
-
-// Insert with FK
+// alice.id is generated; alice.role === 'member'; alice.score === 0
 const post = db.posts.insert({ title: 'Hello', body: '...', user_id: alice.id });
-
-// Bulk insert (transactional — fast)
-const users = db.users.insertMany([
-    { name: 'Bob', email: 'bob@co.com' },
-    { name: 'Carol', email: 'carol@co.com' },
+const more = db.users.insertMany([
+  { name: 'Bob', email: 'bob@co.com' },
+  { name: 'Carol', email: 'carol@co.com' },
 ]);
 
-// ── READ ────────────────────────────────────────────────────
-const one  = db.users.select().where({ id: 1 }).get();        // single row or null
-const same = db.users.select().where({ id: 1 }).first();       // alias for .get()
-const all  = db.users.select().all();                           // array
-const count = db.users.select().count();                        // number
-const has  = db.users.select().where({ role: 'admin' }).exists(); // boolean
+const byId = db.users.get(alice.id);                      // row or null
+const found = db.users.select().where({ id: alice.id }).get();
+const first = db.users.select().where({ role: 'member' }).first();
+const all = db.users.select().all();
+const exists = db.users.select().where({ role: 'admin' }).exists();
 
-// ── UPDATE ──────────────────────────────────────────────────
-// By ID:
 db.users.update(alice.id, { role: 'admin' });
+alice.update({ role: 'member' });
+alice.score = 200;                                       // proxy auto-persists
 
-// On entity:
-alice.update({ role: 'admin' });
-
-// Auto-persist — just set a property:
-alice.score = 200;  // → UPDATE users SET score = 200 WHERE id = ...
-
-// Fluent (bulk):
-db.users.update({ role: 'member' }).where({ role: 'guest' }).exec();
-
-// ── UPSERT ──────────────────────────────────────────────────
 db.users.upsert(
-    { email: 'alice@co.com' },                                  // match condition
-    { name: 'Alice', email: 'alice@co.com', role: 'admin' },   // full data
+  { email: 'alice@co.com' },
+  { name: 'Alice', email: 'alice@co.com', role: 'admin' },
+);
+db.users.upsertMany([{ id: alice.id, name: 'Alice', email: 'alice@co.com' }], 'id');
+const { entity, created } = db.users.findOrCreate(
+  { email: 'dave@co.com' },
+  { name: 'Dave', email: 'dave@co.com', role: 'member' },
 );
 
-// ── DELETE ──────────────────────────────────────────────────
-db.users.delete(alice.id);
-alice.delete();     // on entity
-
-// Fluent (bulk):
-db.users.delete().where({ role: 'banned' }).exec();  // returns deleted count
+// Delete by id or entity; use select().where() for batch mutations.
+const temporary = db.posts.insert({ title: 'Temp', body: '', user_id: alice.id });
+db.posts.delete(temporary.id); // alternatively: temporary.delete();
 ```
 
----
+Zod validates inserts/updates and applies defaults. Proxy property assignments persist immediately; no `.save()` call is needed. `insertMany` is transactional. `created` reports whether `findOrCreate` inserted a row.
 
-## 3. Querying — Every Pattern You Need
+## 3. Fluent queries and projections
 
-### Basic filters
-```typescript
-const admins = db.users.select().where({ role: 'admin' }).all();
-```
-
-### Operators: `$gt` `$gte` `$lt` `$lte` `$ne` `$in` `$like` `$notIn` `$between` `$isNull` `$isNotNull`
 ```typescript
 const top = db.users.select()
-    .where({ score: { $gt: 50 } })
-    .orderBy('score', 'desc')
-    .limit(10)
-    .all();
+  .where({ score: { $gt: 50 }, role: { $ne: 'banned' } })
+  .orderBy('score', 'DESC').limit(10).all();
+const members = db.users.select().where({ role: { $in: ['member', 'admin'] } }).all();
+const similar = db.users.select().where({ name: { $like: '%Ali%' } }).all();
+const excluded = db.users.select().where({ role: { $notIn: ['banned'] } }).all();
+const range = db.users.select().where({ score: { $between: [10, 100] } }).all();
+const either = db.users.select()
+  .where({ $or: [{ role: 'admin' }, { score: { $gte: 100 } }] }).all();
+const page2 = db.users.select().orderBy('name', 'asc').limit(20).offset(20).all();
+const names = db.users.select('name', 'email').all(); // only these fields typed
+// names[0].score is a TypeScript error; filtering can still use other columns.
 
-const specific = db.users.select()
-    .where({ role: { $in: ['admin', 'moderator'] } })
-    .all();
-
-const notGuest = db.users.select()
-    .where({ role: { $ne: 'guest' } })
-    .all();
-
-const matches = db.users.select()
-    .where({ name: { $like: '%Ali%' } })
-    .all();
-
-const excluded = db.users.select()
-    .where({ role: { $notIn: ['banned', 'suspended'] } })
-    .all();
-
-const range = db.posts.select()
-    .where({ year: { $between: [2020, 2025] } })
-    .all();
-
-// NULL checks:
-const noBio = db.users.select().where({ bio: { $isNull: true } }).all();
-const hasBio = db.users.select().where({ bio: { $isNotNull: true } }).all();
+const ids = db.posts.select('user_id');
+const authors = db.users.select().whereIn('id', ids).all(); // subquery
+const named = db.users.select().whereIn('name', ['Alice', 'Bob']).all();
+const other = db.users.select().whereNotIn('id', [1, 2]).all();
+const firstOrError = db.users.select().where({ id: alice.id }).firstOrFail();
+const justNames = db.users.select().pluck('name'); // flat string[]
 ```
 
-### `$or`
+Operators: `$gt`, `$gte`, `$lt`, `$lte`, `$ne`, `$in`, `$notIn`, `$like`, `$between`, `$isNull`, `$isNotNull` (NULL operators require a nullable column). `.select('name', 'email')` narrows `.all()`, `.get()`, `.first()`, and `.paginate()` results. `.firstOrFail()` throws if no row matches.
+
 ```typescript
-const result = db.users.select()
-    .where({ $or: [{ role: 'admin' }, { score: { $gt: 100 } }] })
-    .all();
+const total = db.users.count();
+const activeCount = db.users.select().where({ role: 'admin' }).count();
+const sum = db.users.select().sum('score');
+const avg = db.users.select().avg('score');
+const min = db.users.select().min('score');
+const max = db.users.select().max('score');
+const grouped = db.users.select('role').groupBy('role').countGrouped();
+const popular = db.users.select('role').groupBy('role')
+  .having({ 'COUNT(*)': { $gt: 5 } }).raw().all();
+const distinct = db.users.select('score').distinct().raw().all();
+const page = db.users.select().orderBy('name').paginate(2, 20);
+// page: { data, total, page, perPage, pages }; offset pagination
+
+const base = db.users.select().where({ score: { $gte: 10 } });
+const high = base.clone().where({ role: 'admin' });
+const low = base.clone().where({ role: 'member' });
+const compiled = high.toSQL(); // { sql, params }; does not execute
 ```
 
-### Select specific columns
+## 4. Relationships, joins, and eager loading
+
+For `posts.user_id -> users`, the forward accessor strips trailing `_id`, and the default inverse is the child table name:
+
 ```typescript
-const names = db.users.select('name', 'email').all();
+post.user();          // related parent, lazy
+alice.posts();        // related children, lazy
+const eagerPosts = db.posts.select().with('user').all();
+eagerPosts[0].user;   // loaded related user property, not a call
+const eagerUsers = db.users.select().with('posts').all();
+eagerUsers[0].posts;  // loaded child array; avoids N+1 queries
+
+const joined = db.posts.select('title', 'published')
+  .join('users', 'user_id', ['name', 'email'])
+  .where({ published: true }).all();
+// joined fields are prefixed: users_name, users_email
 ```
 
-### Ordering, pagination
+**Naming:** Only a trailing `_id` is stripped: `author_id -> author()`. A camelCase `userId` column does **not** produce `user()`; its stored field occupies `userId`, so navigation is `userIdRelation()`. A stored field or method collision appends `Relation` until a free accessor name is found. Invalid/irresolvable forward accessor collisions and unknown relation target tables are rejected at initialization.
+
+With **multiple child FKs to one parent**, *every* inverse accessor includes `By<FK>` (PascalCase, underscores create word boundaries), regardless of declaration order:
+
 ```typescript
-const page2 = db.users.select()
-    .orderBy('name', 'asc')
-    .limit(20)
-    .offset(20)
-    .all();
+const graph = new Database(':memory:', {
+  agents: z.object({ name: z.string() }),
+  grants: z.object({
+    authorRef: z.number(), agentRef: z.number(), auditorRef: z.number(),
+  }),
+}, {
+  relations: {
+    grants: { authorRef: 'agents', agentRef: 'agents', auditorRef: 'agents' },
+  },
+});
+const agent = graph.agents.insert({ name: 'A' });
+const grant = graph.grants.insert({
+  authorRef: agent.id, agentRef: agent.id, auditorRef: agent.id,
+});
+agent.grantsByAuthorRef();
+agent.grantsByAgentRef();
+agent.grantsByAuditorRef();
+grant.agentRef;           // numeric FK column
+grant.agentRefRelation(); // parent entity; avoids stored-field collision
+graph.agents.select().with('grantsByAuthorRef').all();
+graph.grants.select().join('agents', 'authorRef', ['name']).all();
+// .join('agents') is ambiguous and throws.
 ```
 
-### Count with filter
-```typescript
-const activeCount = db.users.select().where({ role: { $ne: 'banned' } }).count();
-```
+For a self-relation `nodes.nodes_id -> nodes`, accessors are `nodes()` and `nodesByNodesId()`. Eager loading uses these same names. Prefer explicit-FK joins where there is any potential ambiguity. Use `.with(...)` for related rows without N+1 queries; don't cast filter keys to `any` to pretend relation properties are stored columns.
 
-### Group by + HAVING
-```typescript
-const byRole = db.users.select('role').groupBy('role').raw().all();
-
-// Only groups with more than 5 members:
-const popular = db.users.select('role')
-    .groupBy('role')
-    .having({ 'COUNT(*)': { $gt: 5 } })
-    .raw().all();
-```
-
-### Distinct
-```typescript
-const uniqueScores = db.users.select('score').distinct().raw().all();
-```
-
-### Aggregate functions
-```typescript
-const total  = db.users.select().sum('score');   // number
-const avg    = db.users.select().avg('score');   // number
-const lowest = db.users.select().min('score');   // number | string | null
-const top    = db.users.select().max('score');   // number | string | null
-
-// With filters:
-const activeSum = db.users.select()
-    .where({ role: { $ne: 'banned' } })
-    .sum('score');
-```
-
-### Paginate helper
-```typescript
-const page = db.users.select()
-    .orderBy('name')
-    .paginate(2, 20);  // page 2, 20 per page
-
-// Returns: { data: T[], total: number, page: number, perPage: number, pages: number }
-```
-
----
-
-## 4. Relationships
-
-### Lazy navigation
-FK column `author_id` → navigation method `author()` (strips `_id`).
+For custom multi-table selections, the proxy query API supports column references:
 
 ```typescript
-// belongs-to: book → author
-const book = db.posts.select().where({ id: 1 }).get()!;
-const author = book.user();     // → the user who wrote it
-
-// has-many: user → posts
-const posts = alice.posts();    // → all posts by alice
-
-// Chain them
-const allByAuthor = book.user().posts();
-```
-
-### Fluent join
-Auto-infers FK from relations config:
-
-```typescript
-const rows = db.posts.select('title', 'published')
-    .join(db.users, ['name', 'email'])
-    .where({ published: true })
-    .orderBy('title', 'asc')
-    .all();
-// → [{ title: 'Hello', published: true, users_name: 'Alice', users_email: '...' }]
-```
-
-Joined columns are prefixed: `users_name`, `users_email`.
-
-### Filter by entity reference
-```typescript
-const alicePosts = db.posts.select().where({ user: alice } as any).all();
-```
-
-### Filter by joined column (dot-qualified)
-```typescript
-const rows = db.posts.select('title')
-    .join(db.users, ['name', 'role'])
-    .where({ 'users.role': 'admin' } as any)
-    .all();
-```
-
-### Eager loading — `.with()`
-Avoids N+1 queries:
-
-```typescript
-const usersWithPosts = db.users.select().with('posts').all();
-// Each user has a .posts array, fully loaded in 2 queries total
-
-const singleUser = db.users.select().where({ id: 1 }).with('posts').get()!;
-// singleUser.posts = [{ title: '...', ... }, ...]
-```
-
-### Proxy query (SQL-like control)
-For complex multi-table queries:
-
-```typescript
-const rows = db.query(c => {
-    const { users: u, posts: p } = c;
-    return {
-        select: { author: u.name, title: p.title },
-        join: [[p.user_id, u.id]],
-        where: { [u.role]: 'admin' },
-        orderBy: { [p.title]: 'asc' },
-        limit: 10,
-    };
+const proxyRows = db.query(c => {
+  const { users: u, posts: p } = c;
+  return {
+    select: { author: u.name, title: p.title },
+    join: [[p.user_id, u.id]],
+    where: { [u.role]: 'admin' },
+    orderBy: { [p.title]: 'asc' },
+    limit: 10,
+  };
 });
 ```
 
----
-
-## 5. Change Listeners — Real-time Reactivity
+## 5. Mutations, transactions, and lifecycle hooks
 
 ```typescript
-// Listen for inserts
-const unsub = db.users.on('insert', (user) => {
-    console.log('New user:', user.name);
-});
+const updated = db.users.select().where({ role: 'member' })
+  .updateAll({ role: 'admin' }); // affected row count
+const deleted = db.users.select().where({ role: 'banned' }).deleteAll();
+const increments = db.users.select().where({ id: alice.id }).increment('score', 10);
+db.users.select().where({ id: alice.id }).decrement('score', 5);
+// increment/decrement are atomic; default increment is 1.
 
-// Listen for updates (receives the full updated row)
-db.users.on('update', (user) => {
-    console.log('Updated:', user.name, 'new score:', user.score);
-});
-
-// Listen for deletes (row is gone, only id available)
-db.users.on('delete', ({ id }) => {
-    console.log('Deleted user:', id);
-});
-
-// Stop listening
-unsub();
-```
-
-**How it works:** SQLite triggers log every mutation to a `_changes` table. A single global poller (100ms default) dispatches events to registered listeners. ~150ns idle cost.
-
-### Disable reactivity (zero overhead)
-```typescript
-const db = new Database('app.db', schemas, { reactive: false });
-// .on() will throw — use this when you don't need listeners
-```
-
----
-
-## 6. Transactions
-
-```typescript
 const result = db.transaction(() => {
-    const user = db.users.insert({ name: 'New', email: 'new@co.com' });
-    const post = db.posts.insert({ title: 'First', body: '...', user_id: user.id });
-    return { user, post };
+  const user = db.users.insert({ name: 'Eve', email: 'eve@co.com' });
+  const post = db.posts.insert({ title: 'First', body: '...', user_id: user.id });
+  return { user, post };
 });
-// Automatically rolls back on error — nothing is committed
+// Synchronous; commits on success, rolls back on error; nested calls use savepoints.
+// db.transaction(work, { mode: 'deferred' });
+// db.transaction(work, { mode: 'exclusive' });
 ```
 
-### Cleanup
-```typescript
-// Close the database when shutting down (stops poller, releases SQLite handle)
-db.close();
-```
-
----
-
-## 7. Raw SQL
-
-When you need full control over SQL:
+Transactions use `BEGIN IMMEDIATE` by default, do not replay callbacks, and throw on lock timeouts. Hooks are configured per table; `beforeUpdate` receives **(id, data)**, not `(data, id)`:
 
 ```typescript
-// Select query — returns rows
-const rows = db.raw<{ name: string; total: number }>(
-    'SELECT name, SUM(score) as total FROM users GROUP BY name'
-);
-
-// Mutation — no return
-db.exec('UPDATE users SET score = ? WHERE name = ?', 999, 'Alice');
-```
-
----
-
-## 8. Auto Timestamps
-
-```typescript
-const db = new Database('app.db', schemas, { timestamps: true });
-
-const user = db.users.insert({ name: 'Alice', email: 'a@co.com' });
-// user row has createdAt + updatedAt set to current ISO timestamp
-
-db.users.update(user.id, { name: 'Alice Updated' });
-// updatedAt bumped, createdAt unchanged
-```
-
----
-
-## 9. Soft Deletes
-
-```typescript
-const db = new Database('app.db', schemas, { softDeletes: true });
-
-db.users.delete(user.id);
-// Row NOT removed — sets `deletedAt` to current timestamp
-
-// Queries auto-exclude soft-deleted rows:
-db.users.select().all();  // only non-deleted
-
-// Include soft-deleted:
-db.users.select().withTrashed().all();  // all rows including deleted
-
-// Query only deleted rows:
-db.users.select().onlyTrashed().all();  // only soft-deleted
-
-// Restore a soft-deleted row:
-db.users.restore(user.id);  // sets deletedAt = null
-
-// Batch soft delete:
-db.users.delete().where({ score: { $lt: 10 } }).exec();  // soft-deletes matching rows
-```
-
----
-
-## 10. Lifecycle Hooks
-
-```typescript
-const db = new Database('app.db', schemas, {
-    hooks: {
-        users: {
-            beforeInsert: (data) => ({ ...data, name: data.name.trim() }),
-            afterInsert:  (entity) => console.log('Created:', entity.id),
-            beforeUpdate: (data, id) => ({ ...data, updatedBy: 'system' }),
-            afterUpdate:  (entity) => auditLog.push(entity),
-            beforeDelete: (id) => { if (isProtected(id)) return false; },  // cancel
-            afterDelete:  (id) => console.log('Deleted:', id),
-        },
-    },
+const hookedDb = new Database(':memory:', {
+  users: z.object({ name: z.string() }),
+}, {
+  hooks: { users: {
+    beforeInsert: (data) => ({ ...data, name: data.name.trim() }),
+    afterInsert: (entity) => { /* audit entity.id */ },
+    beforeUpdate: (id, data) => ({ ...data, name: data.name.trim() }),
+    afterUpdate: (entity) => { /* audit entity.id */ },
+    beforeDelete: (id) => true, // return false to cancel
+    afterDelete: (id) => { /* audit deletion */ },
+  } },
 });
 ```
 
-Hooks fire on all paths: insert, insertMany, update, delete (hard and soft).
-`beforeInsert`/`beforeUpdate` can return modified data. `beforeDelete` can return `false` to cancel.
+Hooks cover insert, insertMany, update, and hard/soft delete paths; before hooks may transform data or cancel deletes as shown.
 
----
+## 6. Optional table features
 
-## 11. Debug Mode (Query Logging)
+**Timestamps and soft deletes:** Enable with `{ timestamps: true, softDeletes: true }`. Inserts set `createdAt`/`updatedAt` (ISO timestamps); updates bump `updatedAt`. Deletion sets `deletedAt` rather than removing the row. Selects omit soft-deleted rows unless requested:
 
 ```typescript
-const db = new Database('app.db', schemas, { debug: true });
-// All SQL queries logged to console: [satidb] SELECT * FROM users ...
+const softDb = new Database(':memory:', {
+  users: z.object({ name: z.string() }),
+}, { softDeletes: true, timestamps: true });
+const softUser = softDb.users.insert({ name: 'Alice' });
+softUser.createdAt; softUser.updatedAt;
+softDb.users.delete(softUser.id);      // sets deletedAt
+softDb.users.select().all();           // excludes deleted
+softDb.users.select().withTrashed().all(); // includes deleted
+softDb.users.select().onlyTrashed().all(); // deleted only
+softDb.users.restore(softUser.id);     // clears deletedAt
 ```
 
----
+**Cascade deletes:** `{ relations: { books: { author_id: 'authors' } }, cascade: { authors: ['books'] } }` deletes matching books when an author is deleted. With soft deletes, children are soft-deleted too. Include both tables and `author_id` in the actual schema.
 
-## 12. Unique Constraints
-
-```typescript
-const db = new Database('app.db', schemas, {
-    unique: {
-        users: [['email']],                 // single column unique
-        posts: [['slug'], ['title', 'author_id']], // multiple unique constraints
-    },
-});
-db.users.insert({ name: 'Bob', email: 'bob@co.com' });  // OK
-db.users.insert({ name: 'Bob2', email: 'bob@co.com' }); // throws — duplicate email
-```
-
----
-
-## 13. Schema Introspection
+**JSON fields:** Zod objects and arrays stored in columns serialize to JSON text and deserialize on reads:
 
 ```typescript
-db.tables();            // ['users', 'posts'] — user-defined table names
-db.columns('users');    // [{ name: 'id', type: 'INTEGER', ... }, { name: 'email', type: 'TEXT', ... }]
-```
-
----
-
-## 14. upsertMany
-
-```typescript
-// Batch upsert — inserts or updates based on id/conditions
-db.users.upsertMany([
-    { name: 'Alice', email: 'a@co.com', score: 100 },
-    { name: 'Bob',   email: 'b@co.com', score: 200 },
-]);
-```
-
----
-
-## 15. countGrouped
-
-```typescript
-db.users.select('role').groupBy('role').countGrouped()
-// → [{ role: 'admin', count: 5 }, { role: 'member', count: 12 }]
-```
-
----
-
-## 16. findOrCreate
-
-```typescript
-const { entity, created } = db.users.findOrCreate(
-    { email: 'alice@co.com' },          // conditions to match
-    { name: 'Alice', role: 'member' },  // defaults if creating
-);
-created;       // true if new, false if found
-```
-
----
-
-## 17. whereRaw
-
-```typescript
-// Raw SQL WHERE — escape hatch for complex conditions
-db.users.select()
-    .whereRaw('score > ? AND role != ?', [50, 'guest'])
-    .all()
-
-// Combines with .where()
-db.users.select().where({ role: 'admin' }).whereRaw('score > ?', [90]).all()
-```
-
----
-
-## 18. JSON Columns
-
-```typescript
-const ConfigSchema = z.object({
+const jsonDb = new Database(':memory:', {
+  configs: z.object({
     name: z.string(),
     settings: z.object({ theme: z.string(), notifications: z.boolean() }),
     tags: z.array(z.string()).default([]),
+  }),
 });
-const db = new Database(':memory:', { configs: ConfigSchema });
-
-// Objects/arrays auto-serialize to JSON TEXT on write
-const c = db.configs.insert({ name: 'u1', settings: { theme: 'dark', notifications: true } });
-c.settings.theme;  // 'dark' — auto-parsed back to object on read
-c.tags;            // [] — arrays too
-```
-
----
-
-## 19. Select Type Narrowing
-
-Type-safe column selection — `.select('name', 'email')` narrows the return type:
-```typescript
-// Full entity (all fields)
-const users = db.users.select().all();
-users[0].name;  // ✅ string
-users[0].email; // ✅ string
-users[0].score; // ✅ number
-
-// Narrowed — only selected columns in return type
-const names = db.users.select('name', 'email').all();
-names[0].name;  // ✅ string
-names[0].email; // ✅ string
-names[0].score; // ❌ TypeScript error — not selected
-```
-
-Works with `.get()`, `.first()`, `.paginate()`, and `await`.
-`.where()` and `.orderBy()` still accept all entity fields for filtering.
-
----
-
-## 20. Count Shorthand
-
-```typescript
-db.users.count();  // → 42 (fast, no QueryBuilder needed)
-```
-Respects `softDeletes` — only counts non-deleted rows.
-
----
-
-## 21. Computed Getters
-
-```typescript
-const db = new Database(':memory:', { users: UserSchema }, {
-    computed: {
-        users: {
-            fullName: (u) => `${u.first} ${u.last}`,
-            isVip: (u) => u.score > 100,
-        },
-    },
+const config = jsonDb.configs.insert({
+  name: 'one', settings: { theme: 'dark', notifications: true },
 });
-const user = db.users.insert({ first: 'Alice', last: 'Smith', ... });
-user.fullName;  // 'Alice Smith'
-user.isVip;     // false
-user.score = 200;
-user.isVip;     // true — recomputes on access
+config.settings.theme; // 'dark'
+config.tags;           // []
 ```
 
----
-
-## 22. Cascade Deletes
+**Computed getters:** Define virtual fields under `computed`, recomputed on access (the stored schema must define the referenced fields):
 
 ```typescript
-const db = new Database(':memory:', { authors: AuthorSchema, books: BookSchema }, {
-    relations: { books: { author_id: 'authors' } },
-    cascade: { authors: ['books'] },
-});
-db.authors.delete(1);  // → auto-deletes all books with author_id = 1
-```
-With `softDeletes: true`, children are soft-deleted too.
-
----
-
-## 23. Data Export (dump)
-
-```typescript
-const data = db.dump();
-// { users: [{ id: 1, name: 'Alice', ... }, ...], posts: [...] }
-fs.writeFileSync('backup.json', JSON.stringify(data));
-```
-
----
-
-## 24. Data Import (load)
-
-```typescript
-const backup = JSON.parse(fs.readFileSync('backup.json', 'utf-8'));
-db.load(backup);                   // truncates existing data first
-db.load(backup, { append: true }); // inserts without truncating
-```
-
----
-
-## 25. Seed Fixtures
-
-```typescript
-db.seed({
-    users: [
-        { name: 'Alice', email: 'a@co.com' },
-        { name: 'Bob', email: 'b@co.com' },
-    ],
-    posts: [
-        { title: 'Hello', body: '...' },
-    ],
-});
-```
-Additive — does NOT truncate. Perfect for test fixtures.
-
----
-
-## 26. Schema Diffing
-
-```typescript
-const d = db.diff();
-// { users: { added: ['bio'], removed: [], typeChanged: [] } }
-```
-Compares Zod schemas against live SQLite tables. Reports added, removed, and type-changed columns.
-
----
-
-## 27. whereIn / whereNotIn
-
-```typescript
-// Array of values
-db.users.select().whereIn('name', ['Alice', 'Bob']).all()
-db.users.select().whereNotIn('id', [1, 2]).all()
-
-// Subquery — users who have orders
-const sub = db.orders.select('userId');
-db.users.select().whereIn('id', sub).all()
-```
-Subqueries compile the inner QueryBuilder IQO and nest as `WHERE col IN (SELECT ...)`.
-
----
-
-## 28. Batch updateAll
-
-```typescript
-const affected = db.users.select().where({ role: 'guest' }).updateAll({ role: 'member' });
-// → 42 (number of updated rows)
-```
-Updates all matching rows in a single statement. Combines with `.where()`, `.whereIn()`, etc.
-
----
-
-## 29. Batch deleteAll
-
-```typescript
-const deleted = db.users.select().where({ role: 'guest' }).deleteAll();
-// → 12 (number of deleted rows)
-```
-
----
-
-## 30. Transactions
-
-```typescript
-db.transaction(() => {
-    db.users.insert({ name: 'Alice' });
-    db.orders.insert({ userId: 1, amount: 100 });
-}); // auto-commits; rolls back on error
-
-const count = db.transaction(() => {
-    db.users.insert({ name: 'Bob' });
-    return db.users.count(); // return values supported
-});
-```
-
----
-
-## 31. WAL Mode
-
-WAL (Write-Ahead Logging) is enabled by default for better concurrent read/write performance.
-```typescript
-new Database('app.db', schemas);                // WAL on (default)
-new Database('app.db', schemas, { wal: false }); // WAL off
-```
-
----
-
-## 32. pluck
-
-```typescript
-db.users.select().pluck('name')  // → ['Alice', 'Bob', 'Charlie']
-db.users.select().where({ role: 'admin' }).pluck('email')
-```
-Flat array of values for a single column.
-
----
-
-## 33. clone
-
-```typescript
-const base = db.users.select().where({ active: true });
-const admins = base.clone().where({ role: 'admin' });
-const guests = base.clone().where({ role: 'guest' });
-```
-Forks a query builder so both branches operate independently.
-
----
-
-## 34. toSQL
-
-```typescript
-db.users.select().where({ role: 'admin' }).toSQL()
-// → { sql: 'SELECT ... WHERE ...', params: ['admin'] }
-```
-Compiles and returns the SQL query + params without executing. Great for debugging.
-
----
-
-## 35. firstOrFail
-
-```typescript
-const user = db.users.select().where({ id: 1 }).firstOrFail();
-// throws Error('No matching row found') if nothing matches
-```
-
----
-
-## 36. increment / decrement
-
-```typescript
-db.users.select().where({ id: 1 }).increment('score', 10)  // score += 10
-db.users.select().where({ id: 1 }).decrement('score', 5)   // score -= 5
-db.users.select().where({ role: 'vip' }).increment('score') // score += 1 (default)
-```
-Atomic counter updates. Returns the number of affected rows.
-
----
-
-## 37. Schema Validation
-
-Zod validates every insert and update:
-```typescript
-db.users.insert({ name: 123 } as any);         // throws ZodError — wrong type
-db.users.insert({ name: 'X' } as any);         // throws — missing required email
-```
-
-Defaults are applied automatically:
-```typescript
-const user = db.users.insert({ name: 'Bob', email: 'bob@co.com' });
-user.role;  // → 'member' (from z.string().default('member'))
-user.score; // → 0 (from z.number().int().default(0))
-```
-
----
-
-## 38. measure-fn Instrumentation
-
-With `debug: true`, SatiDB uses [measure-fn](https://www.npmjs.com/package/measure-fn) for automatic timing of all operations:
-```typescript
-const db = new Database('app.db', schemas, { debug: true });
-// Output:
-// [satidb:a] ✓ Init tables 0.45ms
-// [satidb:b] ✓ Change tracking 1.20ms
-// [satidb:c] ✓ Run migrations 0.03ms
-// [satidb:d] ✓ users.insert 0.12ms → {"id":1,...}
-```
-Zero overhead when `debug` is off — functions execute directly without measurement.
-
----
-
-## 39. Prepared Statement Caching
-
-SatiDB automatically caches compiled SQL statements. Repeated operations with identical SQL patterns reuse the same prepared statement instead of re-parsing:
-```typescript
-// These all reuse cached statements internally:
-for (let i = 0; i < 1000; i++) {
-    db.users.insert({ name: `User ${i}`, email: `u${i}@co.com` });
-}
-db.users.select().where({ name: 'Alice' }).get(); // cached
-db.users.count();                                  // cached
-db.raw('SELECT * FROM "users" WHERE name = ?', 'Bob'); // cached
-```
-No configuration needed — caching is always on. The cache is per-database instance and cleared on `close()`.
-
----
-
-## 40. Common Patterns
-
-### Chat/message storage
-```typescript
-const db = new Database('chat.db', {
-    messages: z.object({
-        role: z.enum(['user', 'assistant', 'system']),
-        content: z.string(),
-        channel: z.string().default('general'),
-        timestamp: z.string().default(() => new Date().toISOString()),
-    }),
+const people = new Database(':memory:', {
+  users: z.object({ first: z.string(), last: z.string(), score: z.number() }),
 }, {
-    indexes: { messages: ['channel', 'timestamp'] },
+  computed: { users: {
+    fullName: (u) => `${u.first} ${u.last}`,
+    isVip: (u) => u.score > 100,
+  } },
 });
-
-db.messages.insert({ role: 'user', content: 'Hello!' });
-const history = db.messages.select()
-    .where({ channel: 'general' })
-    .orderBy('timestamp', 'asc')
-    .all();
+const person = people.users.insert({ first: 'Alice', last: 'Smith', score: 0 });
+person.fullName; // 'Alice Smith'
+person.score = 200;
+person.isVip; // true
 ```
 
-### Config/settings store
+## 7. Typed views and SQL escape hatches
+
 ```typescript
-const db = new Database('config.db', {
-    settings: z.object({
-        key: z.string(),
-        value: z.string(),
-    }),
+import { defineView } from 'sqlite-zod-orm';
+
+const reports = new Database(':memory:', {
+  users: z.object({ name: z.string(), score: z.number() }),
 }, {
-    indexes: { settings: ['key'] },
+  views: {
+    high_scores: defineView(z.object({
+      name: z.string(), score: z.number(),
+    }), `SELECT name, score FROM users WHERE score >= 50`),
+  },
 });
+reports.high_scores.select().all(); // typed, read-only view rows
+reports.views();                    // ['high_scores']
 
-// Upsert pattern — set if exists, insert if not
-db.settings.upsert({ key: 'theme' }, { key: 'theme', value: 'dark' });
-const theme = db.settings.select().where({ key: 'theme' }).get()?.value;
+const rawRows = db.raw<{ name: string }>(
+  'SELECT name FROM users WHERE score > ?', 50,
+);
+db.exec('UPDATE users SET score = ? WHERE name = ?', 99, 'Alice');
+const rawFilter = db.users.select()
+  .where({ role: 'admin' })
+  .whereRaw('score > ?', [50]).all();
 ```
 
-### Job queue
+Views are SQL-backed, read-only, and recreated when definitions change; invalid dependent views can abort migration. `whereRaw`, `db.raw`, and `db.exec` **take SQL**. Use the fluent builder for ordinary CRUD; parameterize SQL values instead of interpolating user input.
+
+## 8. Introspection, backups, and debugging
+
 ```typescript
-const db = new Database('jobs.db', {
-    jobs: z.object({
-        type: z.string(),
-        payload: z.string(),
-        status: z.string().default('pending'),
-        created_at: z.string().default(() => new Date().toISOString()),
-    }),
-}, {
-    indexes: { jobs: ['status', 'type'] },
-});
-
-// Enqueue
-db.jobs.insert({ type: 'email', payload: JSON.stringify({ to: 'a@b.com' }) });
-
-// Dequeue next pending
-const next = db.jobs.select()
-    .where({ status: 'pending', type: 'email' })
-    .orderBy('created_at', 'asc')
-    .limit(1)
-    .get();
-
-if (next) {
-    next.update({ status: 'processing' });
-    // ... do work ...
-    next.update({ status: 'done' });
-}
+db.tables();          // application table names
+db.columns('users');  // SQLite column metadata
+db.diff();            // { users: { added: [...], removed: [...], typeChanged: [...] } }
+const backup = db.dump();
+db.load(backup);                       // replaces existing table data
+// db.load(otherBackup, { append: true }); // alternative: adds without truncating
+db.seed({ users: [{ name: 'Test', email: 'test@co.com' }] }); // additive fixtures
+db.close();                           // release SQLite handle
 ```
 
-### Real-time dashboard with .on()
-```typescript
-db.users.on('insert', (user) => {
-    broadcastToClients({ event: 'new_user', data: user });
-});
-
-db.users.on('update', (user) => {
-    broadcastToClients({ event: 'user_updated', data: user });
-});
-```
-
-### Parent-child with eager loading
-```typescript
-const db = new Database(':memory:', {
-    categories: z.object({ name: z.string() }),
-    products: z.object({
-        name: z.string(),
-        price: z.number(),
-        category_id: z.number().optional(),
-    }),
-}, {
-    relations: { products: { category_id: 'categories' } },
-});
-
-// Load all categories with their products (2 SQL queries, not N+1)
-const categories = db.categories.select().with('products').all();
-// categories[0].products = [{ name: 'Widget', price: 9.99, ... }, ...]
-```
-
----
-
-## Architecture (for contributors)
-
-```
-src/
-├── index.ts        — barrel exports
-├── database.ts     — Database class, constructor, table proxy, reactivity
-├── query.ts        — barrel re-export + QueryBuilder factory
-├── builder.ts      — QueryBuilder class (fluent API)
-├── iqo.ts          — Internal Query Object types + SQL compiler
-├── proxy.ts        — Proxy query system (ColumnNode, compileProxyQuery)
-├── crud.ts         — insert, update, updateWhere, delete, getById, upsert
-├── entity.ts       — attachMethods (.update(), .delete(), nav)
-├── schema.ts       — Zod → SQL mapping, migration
-├── context.ts      — DatabaseContext interface
-├── helpers.ts      — buildWhereClause, SQL helpers
-├── ast.ts          — AST nodes, compileAST, proxies, operators
-└── types.ts        — all TypeScript types and generics
-```
-
-### Tests
-```bash
-bun test                               # 250 tests, ~1.5s
-bun test test/crud.test.ts             # just CRUD
-bun test test/fluent.test.ts           # query builder
-bun test test/relations.test.ts        # relationships
-bun test test/entity.test.ts           # entities, upsert, validation
-bun test test/reactivity.test.ts       # .on() listeners
-bun test test/ast.test.ts              # AST compiler (unit)
-bun test test/query-builder.test.ts    # IQO compiler (unit)
-bun test test/proxy-query.test.ts      # proxy query (unit)
-bun test test/new-features.test.ts     # operators, insertMany, groupBy, deleteWhere
-bun test test/v311-features.test.ts    # aggregates, paginate, timestamps, soft deletes, debug
-```
-
-Each test file creates its own `:memory:` DB via `createTestDb()` from `test/setup.ts`.
-
-### Benchmarks
-```bash
-bun bench/triggers-vs-naive.ts         # change detection strategies
-bun bench/poll-strategy.ts             # MAX(id) optimization
-bun bench/indexes.ts                   # index impact on queries
-```
-
-
+`debug: true` enables SQL/query diagnostics and `measure-fn` instrumentation; off by default. Prepared statements are cached per database instance and released on `close()`. Startup installs change tracking, but proxy write-through persistence is **not** a live-query subscription; do not assume an undocumented subscription method. For explicit schema recovery/migrations use `db.migrator()` or the exported `createMigrator`, `DatabaseMigrator`, and `runCli` facilities, and consult `UPGRADING.md` before 3.x -> 4.0 upgrades.
