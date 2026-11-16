@@ -73,6 +73,7 @@ function executeInsert<T extends Record<string, any>>(
   ctx: DatabaseContext,
   entityName: string,
   data: Omit<T, "id">,
+  deferAfterHook = false,
 ): AugmentedEntity<any> {
   const schema = ctx.schemas[entityName]!;
   let inputData = { ...data } as Record<string, any>;
@@ -111,7 +112,7 @@ function executeInsert<T extends Record<string, any>>(
   if (!newEntity) throw new Error("Failed to retrieve entity after insertion");
 
   // afterInsert hook
-  if (hooks?.afterInsert) hooks.afterInsert(newEntity);
+  if (!deferAfterHook && hooks?.afterInsert) hooks.afterInsert(newEntity);
 
   return newEntity;
 }
@@ -129,6 +130,7 @@ export function update<T extends Record<string, any>>(
   entityName: string,
   id: number,
   data: Partial<Omit<T, "id">>,
+  deferAfterHook = false,
 ): AugmentedEntity<any> | null {
   const schema = ctx.schemas[entityName]!;
   let inputData = { ...data } as Record<string, any>;
@@ -161,7 +163,8 @@ export function update<T extends Record<string, any>>(
   const updated = getById(ctx, entityName, id);
 
   // afterUpdate hook
-  if (hooks?.afterUpdate && updated) hooks.afterUpdate(updated);
+  if (!deferAfterHook && hooks?.afterUpdate && updated)
+    hooks.afterUpdate(updated);
 
   return updated;
 }
@@ -212,26 +215,46 @@ export function upsert<T extends Record<string, any>>(
   data: any,
   conditions: any = {},
 ): AugmentedEntity<any> {
-  const hasId = data?.id && typeof data.id === "number";
-  const existing = hasId
-    ? getById(ctx, entityName, data.id)
-    : Object.keys(conditions ?? {}).length > 0
-      ? getOne(ctx, entityName, conditions)
-      : null;
+  // Reserve the write lock BEFORE reading. A deferred transaction permits
+  // two connections to both observe a missing row and race to insert it.
+  const txn = ctx.db.transaction(() => {
+    const hasId = data?.id && typeof data.id === "number";
+    const existing = hasId
+      ? getById(ctx, entityName, data.id)
+      : Object.keys(conditions ?? {}).length > 0
+        ? getOne(ctx, entityName, conditions)
+        : null;
 
-  if (existing) {
-    const updateData = { ...data };
-    delete updateData.id;
-    return update(
-      ctx,
-      entityName,
-      existing.id,
-      updateData,
-    ) as AugmentedEntity<any>;
-  }
-  const insertData = { ...(conditions ?? {}), ...(data ?? {}) };
-  delete insertData.id;
-  return executeInsert(ctx, entityName, insertData);
+    if (existing) {
+      const updateData = { ...data };
+      delete updateData.id;
+      const entity = update(
+        ctx,
+        entityName,
+        existing.id,
+        updateData,
+        true,
+      );
+      if (!entity) throw new Error("Failed to retrieve entity after upsert");
+      return { entity, created: false };
+    }
+
+    const insertData = { ...(conditions ?? {}), ...(data ?? {}) };
+    delete insertData.id;
+    return {
+      entity: executeInsert(ctx, entityName, insertData, true),
+      created: true,
+    };
+  });
+
+  const result = txn.immediate();
+
+  // After-hooks must describe committed changes, never rolled-back ones.
+  const hooks = ctx.hooks[entityName];
+  if (result.created) hooks?.afterInsert?.(result.entity);
+  else hooks?.afterUpdate?.(result.entity);
+
+  return result.entity;
 }
 
 /** Find a row matching conditions, or create it with the merged data. Returns { entity, created }. */
@@ -352,7 +375,8 @@ export function insertMany<T extends Record<string, any>>(
     return ids;
   });
 
-  const ids = txn();
+  // Acquire the write lock before running hooks or inserting any rows.
+  const ids = txn.immediate();
   const entities = ids
     .map((id: number) => getById(ctx, entityName, id)!)
     .filter(Boolean);
@@ -382,5 +406,5 @@ export function upsertMany<T extends Record<string, any>>(
     return results;
   });
 
-  return txn();
+  return txn.immediate();
 }
