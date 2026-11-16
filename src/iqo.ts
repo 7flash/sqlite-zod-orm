@@ -81,6 +81,47 @@ export const OPERATOR_MAP: Record<WhereOperator, string> = {
   $isNotNull: "IS NOT NULL",
 };
 
+// Quote dotted identifier paths (e.g. table.column), never SQL expressions.
+export function quoteIdentifierPath(field: string): string {
+  if (typeof field !== "string" || field.length === 0)
+    throw new Error("WHERE field must be a non-empty identifier");
+  const parts = field.split(".");
+  if (parts.some((part) => part.length === 0))
+    throw new Error("Invalid qualified identifier");
+  return parts.map((part) => `"${part.replace(/"/g, '""')}"`).join(".");
+}
+
+const MAX_SQL_PARAMS = 32766;
+const SCALAR_OPERATORS = new Set(["=", ">", ">=", "<", "<=", "!=", "LIKE"]);
+
+function compileWhereCondition(
+  w: WhereCondition,
+  field: string,
+  params: any[],
+): string | null {
+  if (w.operator === "IN" || w.operator === "NOT IN") {
+    if (!Array.isArray(w.value))
+      throw new Error(`${w.operator} requires an array`);
+    if (w.value.length > MAX_SQL_PARAMS)
+      throw new Error(`IN list exceeds ${MAX_SQL_PARAMS} values`);
+    if (w.value.length === 0) return w.operator === "IN" ? "1 = 0" : null;
+    params.push(...w.value.map(transformValueForStorage));
+    return `${field} ${w.operator} (${w.value.map(() => "?").join(", ")})`;
+  }
+  if (w.operator === "BETWEEN") {
+    if (!Array.isArray(w.value) || w.value.length !== 2)
+      throw new Error("BETWEEN requires exactly two values");
+    params.push(...w.value.map(transformValueForStorage));
+    return `${field} BETWEEN ? AND ?`;
+  }
+  if (w.operator === "IS NULL" || w.operator === "IS NOT NULL")
+    return `${field} ${w.operator}`;
+  if (!SCALAR_OPERATORS.has(w.operator))
+    throw new Error(`Unsupported SQL WHERE operator: ${w.operator}`);
+  params.push(transformValueForStorage(w.value));
+  return `${field} ${w.operator} ?`;
+}
+
 export function transformValueForStorage(value: any): any {
   if (value instanceof Date) return value.toISOString();
   if (typeof value === "boolean") return value ? 1 : 0;
@@ -123,6 +164,7 @@ export function compileIQO(
 
   // WHERE clause — AST-based takes precedence if set
   if (iqo.whereAST) {
+    // AST compiler validates and quotes its own identifiers/operators.
     const compiled = compileAST(iqo.whereAST);
     sql += ` WHERE ${compiled.sql}`;
     params.push(...compiled.params);
@@ -130,39 +172,12 @@ export function compileIQO(
     const hasJoins = iqo.joins.length > 0;
     const qualify = (field: string) =>
       hasJoins && !field.includes(".") ? `${tableName}.${field}` : field;
-
     const whereParts: string[] = [];
     for (const w of iqo.wheres) {
-      if (w.operator === "IN") {
-        const arr = w.value as any[];
-        if (arr.length === 0) {
-          whereParts.push("1 = 0");
-        } else {
-          const placeholders = arr.map(() => "?").join(", ");
-          whereParts.push(`${qualify(w.field)} IN (${placeholders})`);
-          params.push(...arr.map(transformValueForStorage));
-        }
-      } else if (w.operator === "NOT IN") {
-        const arr = w.value as any[];
-        if (arr.length === 0) continue; // no-op
-        const placeholders = arr.map(() => "?").join(", ");
-        whereParts.push(`${qualify(w.field)} NOT IN (${placeholders})`);
-        params.push(...arr.map(transformValueForStorage));
-      } else if (w.operator === "BETWEEN") {
-        const [min, max] = w.value as [any, any];
-        whereParts.push(`${qualify(w.field)} BETWEEN ? AND ?`);
-        params.push(
-          transformValueForStorage(min),
-          transformValueForStorage(max),
-        );
-      } else if (w.operator === "IS NULL") {
-        whereParts.push(`${qualify(w.field)} IS NULL`);
-      } else if (w.operator === "IS NOT NULL") {
-        whereParts.push(`${qualify(w.field)} IS NOT NULL`);
-      } else {
-        whereParts.push(`${qualify(w.field)} ${w.operator} ?`);
-        params.push(transformValueForStorage(w.value));
-      }
+      const part = compileWhereCondition(
+        w, quoteIdentifierPath(qualify(w.field)), params,
+      );
+      if (part) whereParts.push(part);
     }
     if (whereParts.length > 0) {
       sql += ` WHERE ${whereParts.join(" AND ")}`;
@@ -171,21 +186,16 @@ export function compileIQO(
 
   // Append OR groups (from $or)
   if (iqo.whereOrs.length > 0) {
+    const hasJoins = iqo.joins.length > 0;
     for (const orGroup of iqo.whereOrs) {
       const orParts: string[] = [];
       for (const w of orGroup) {
-        if (w.operator === "IN") {
-          const arr = w.value as any[];
-          if (arr.length === 0) {
-            orParts.push("1 = 0");
-          } else {
-            orParts.push(`${w.field} IN (${arr.map(() => "?").join(", ")})`);
-            params.push(...arr.map(transformValueForStorage));
-          }
-        } else {
-          orParts.push(`${w.field} ${w.operator} ?`);
-          params.push(transformValueForStorage(w.value));
-        }
+        const field = hasJoins && !w.field.includes(".")
+          ? `${tableName}.${w.field}` : w.field;
+        const part = compileWhereCondition(
+          w, quoteIdentifierPath(field), params,
+        );
+        if (part) orParts.push(part);
       }
       if (orParts.length > 0) {
         const orClause = `(${orParts.join(" OR ")})`;
@@ -240,5 +250,7 @@ export function compileIQO(
   if (iqo.limit !== null) sql += ` LIMIT ${iqo.limit}`;
   if (iqo.offset !== null) sql += ` OFFSET ${iqo.offset}`;
 
+  if (params.length > MAX_SQL_PARAMS)
+    throw new Error(`Query exceeds ${MAX_SQL_PARAMS} bound parameters`);
   return { sql, params };
 }

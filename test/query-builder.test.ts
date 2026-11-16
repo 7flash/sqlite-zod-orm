@@ -71,7 +71,7 @@ test("compileIQO: WHERE conditions", () => {
     having: [],
     distinct: false,
   });
-  expect(sql).toBe("SELECT users.* FROM users WHERE name = ? AND age > ?");
+  expect(sql).toBe('SELECT users.* FROM users WHERE "name" = ? AND "age" > ?');
   expect(params).toEqual(["Alice", 18]);
 });
 
@@ -92,7 +92,7 @@ test("compileIQO: IN operator", () => {
     having: [],
     distinct: false,
   });
-  expect(sql).toContain("role IN (?, ?)");
+  expect(sql).toContain('"role" IN (?, ?)');
   expect(params).toEqual(["admin", "mod"]);
 });
 
@@ -265,9 +265,9 @@ test("QueryBuilder: multiple .where() calls compose with AND", () => {
   qb.where({ age: 30 }).where({ name: "Alice" }).all();
 
   const sql = calls[0]!.sql;
-  expect(sql).toContain("age = ?");
+  expect(sql).toContain('"age" = ?');
   expect(sql).toContain("AND");
-  expect(sql).toContain("name = ?");
+  expect(sql).toContain('"name" = ?');
 });
 
 test("QueryBuilder: operator objects $gt, $in, $ne", () => {
@@ -275,8 +275,8 @@ test("QueryBuilder: operator objects $gt, $in, $ne", () => {
   qb.where({ age: { $gt: 18 }, name: { $ne: "admin" } }).all();
 
   const sql = calls[0]!.sql;
-  expect(sql).toContain("age > ?");
-  expect(sql).toContain("name != ?");
+  expect(sql).toContain('"age" > ?');
+  expect(sql).toContain('"name" != ?');
   expect(calls[0]!.params).toContain(18);
   expect(calls[0]!.params).toContain("admin");
 });

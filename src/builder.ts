@@ -21,7 +21,7 @@ import {
   type WhereOperator,
   type OrderDirection,
   OPERATOR_MAP,
-  compileIQO,
+  compileIQO, quoteIdentifierPath,
 } from "./iqo";
 
 export type QueryCacheOptions = {
@@ -201,13 +201,13 @@ export class QueryBuilder<
                 !(bValue instanceof Date)
               ) {
                 for (const [opKey, operand] of Object.entries(bValue)) {
-                  const sqlOp = OPERATOR_MAP[opKey as WhereOperator];
-                  if (sqlOp)
-                    orConditions.push({
-                      field: bKey,
-                      operator: sqlOp as WhereCondition["operator"],
-                      value: operand,
-                    });
+                  if (!Object.prototype.hasOwnProperty.call(OPERATOR_MAP, opKey))
+                    throw new Error(`Unsupported query operator: '${opKey}'`);
+                  orConditions.push({
+                    field: bKey,
+                    operator: OPERATOR_MAP[opKey as WhereOperator] as WhereCondition["operator"],
+                    value: operand,
+                  });
                 }
               } else {
                 orConditions.push({
@@ -229,11 +229,11 @@ export class QueryBuilder<
           !(value instanceof Date)
         ) {
           for (const [opKey, operand] of Object.entries(value)) {
-            const sqlOp = OPERATOR_MAP[opKey as WhereOperator];
-            if (!sqlOp)
+            if (!Object.prototype.hasOwnProperty.call(OPERATOR_MAP, opKey))
               throw new Error(
                 `Unsupported query operator: '${opKey}' on field '${key}'.`,
               );
+            const sqlOp = OPERATOR_MAP[opKey as WhereOperator];
             if (opKey === "$between") {
               if (!Array.isArray(operand) || operand.length !== 2)
                 throw new Error(`$between for '${key}' requires [min, max]`);
@@ -383,16 +383,14 @@ export class QueryBuilder<
     values: any[] | QueryBuilder<any, any>,
   ): this {
     if (Array.isArray(values)) {
-      const placeholders = values.map(() => "?").join(", ");
-      this.iqo.rawWheres.push({
-        sql: `"${column}" IN (${placeholders})`,
-        params: values,
+      this.iqo.wheres.push({
+        field: column, operator: "IN", value: values,
       });
     } else {
       // Subquery: compile the inner QueryBuilder's IQO
       const inner = compileIQO((values as any).tableName, (values as any).iqo);
       this.iqo.rawWheres.push({
-        sql: `"${column}" IN (${inner.sql})`,
+        sql: `${quoteIdentifierPath(column)} IN (${inner.sql})`,
         params: inner.params,
       });
     }
@@ -407,15 +405,13 @@ export class QueryBuilder<
     values: any[] | QueryBuilder<any, any>,
   ): this {
     if (Array.isArray(values)) {
-      const placeholders = values.map(() => "?").join(", ");
-      this.iqo.rawWheres.push({
-        sql: `"${column}" NOT IN (${placeholders})`,
-        params: values,
+      this.iqo.wheres.push({
+        field: column, operator: "NOT IN", value: values,
       });
     } else {
       const inner = compileIQO((values as any).tableName, (values as any).iqo);
       this.iqo.rawWheres.push({
-        sql: `"${column}" NOT IN (${inner.sql})`,
+        sql: `${quoteIdentifierPath(column)} NOT IN (${inner.sql})`,
         params: inner.params,
       });
     }

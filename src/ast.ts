@@ -18,8 +18,15 @@ export const wrapNode = (val: any): ASTNode =>
 // AST Compiler → SQL + Params
 // ==========================================
 
+const quoteName = (name: string): string => {
+  if (typeof name !== "string" || name.length === 0)
+    throw new Error("SQL identifier must be a non-empty string");
+  return `"${name.replace(/"/g, '""')}"`;
+};
+const AST_OPERATORS = new Set(["=", "!=", ">", ">=", "<", "<=", "AND", "OR", "LIKE", "IS", "IS NOT", "NOT"]);
+
 export function compileAST(node: ASTNode): { sql: string; params: any[] } {
-  if (node.type === "column") return { sql: `"${node.name}"`, params: [] };
+  if (node.type === "column") return { sql: quoteName(node.name), params: [] };
   if (node.type === "literal") {
     if (node.value instanceof Date)
       return { sql: "?", params: [node.value.toISOString()] };
@@ -29,14 +36,30 @@ export function compileAST(node: ASTNode): { sql: string; params: any[] } {
   }
 
   if (node.type === "function") {
+    if (node.name === "IN") {
+      if (node.args.length === 0) throw new Error("IN requires a left operand");
+      const [leftNode, ...valueNodes] = node.args;
+      const left = compileAST(leftNode!);
+      const values = valueNodes.map(compileAST);
+      if (values.length === 0) return { sql: "1 = 0", params: [] };
+      return {
+        sql: `${left.sql} IN (${values.map((v) => v.sql).join(", ")})`,
+        params: [...left.params, ...values.flatMap((v) => v.params)],
+      };
+    }
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(node.name))
+      throw new Error(`Invalid SQL function name: ${JSON.stringify(node.name)}`);
     const compiledArgs = node.args.map(compileAST);
     return {
+      // Validated above as a plain identifier, so it is safe unquoted.
       sql: `${node.name}(${compiledArgs.map((c) => c.sql).join(", ")})`,
       params: compiledArgs.flatMap((c) => c.params),
     };
   }
 
   if (node.type === "operator") {
+    if (!AST_OPERATORS.has(node.op))
+      throw new Error(`Unsupported AST SQL operator: ${node.op}`);
     const left = compileAST(node.left);
     const right = compileAST(node.right);
     return {
@@ -141,8 +164,8 @@ export const op = {
   }),
   in: (left: any, values: any[]): ASTNode => ({
     type: "function",
-    name: `${compileAST(wrapNode(left)).sql} IN`,
-    args: values.map((v) => wrapNode(v)),
+    name: "IN",
+    args: [wrapNode(left), ...values.map((v) => wrapNode(v))],
   }),
   not: (node: any): ASTNode => ({
     type: "operator",
