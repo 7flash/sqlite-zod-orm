@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- `upsert(conditions, data)` takes the write lock before its lookup, so two connections upserting the same key no longer race into a UNIQUE error; its after-hooks run only after commit.
 - Rows with multiple foreign keys referencing the same table now load the correct related record for each key instead of mixing up related records.
 - Lazy relationship navigation, eager loading with .with(), and cascade deletes now follow the specific foreign key associated with each relationship.
 - Self-referencing relationships now distinguish forward navigation from inverse navigation, so parent and child lookups return the intended records.
