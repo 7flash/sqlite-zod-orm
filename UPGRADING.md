@@ -8,8 +8,6 @@ Schema synchronization can reconstruct existing tables rather than modifying the
 
 A rebuild that leaves invalid foreign-key references is rejected.
 
-**Exact error (`src/database.ts:225`):**
-
 ```text
 Schema sync would leave foreign key violations
 ```
@@ -70,8 +68,6 @@ Cannot automatically change type of populated column "<table>.<column>" from <OL
 
 Schema synchronization rejects changes to the declared type of a populated column.
 
-The guard is present at `src/database.ts:505`. Its exact error text is unavailable because the supplied excerpt ends at `throw new Error(`.
-
 For example, changing:
 
 ```typescript
@@ -124,8 +120,6 @@ Cannot automatically drop populated column "<table>.<column>" while adding "<new
 
 Schema synchronization checks for removed columns containing existing data.
 
-The guard is present at `src/database.ts:515`. The supplied source does not expose the complete error message.
-
 A column removal must not silently discard populated data. This also matters when replacing one field with another, such as renaming `full_name` to `displayName`.
 
 Before changing the Zod schema, rename the SQLite column:
@@ -155,9 +149,7 @@ Error you will see:
 Cannot automatically rebuild "<table>": legacy CHECK|ON CONFLICT|NOT NULL constraint/policy cannot be recreated; use an explicit constraint-preserving migration.
 ```
 
-Automatic reconstruction checks existing table constraints. The source contains a guard for unsupported legacy constraints at `src/database.ts:538`, with an explicit `NOT NULL` check visible at lines 535–536.
-
-The exact exception text is unavailable in the provided excerpt.
+Automatic reconstruction checks existing table constraints.
 
 Inspect existing definitions before changing schemas:
 
@@ -201,8 +193,6 @@ Cannot automatically rebuild "<table>": outgoing foreign keys (targets or ON DEL
 ```
 
 Rebuild validation compares foreign-key definitions. A mismatch causes reconstruction to fail rather than silently accepting incompatible references.
-
-The comparison failure is present at `src/database.ts:565`, but its exact message is omitted from the supplied excerpt.
 
 Inspect existing definitions:
 
@@ -249,8 +239,6 @@ Run `PRAGMA foreign_key_check` before committing the migration.
 
 Version 4.0 contains explicit checks for indexes that cannot safely be reconstructed.
 
-**Exact errors (`src/database.ts:604`, `608`, `616`):**
-
 ```text
 Cannot automatically reconstruct inline index '<index>'.
 Rebuild index '<index>' conflicts with an existing schema object.
@@ -294,15 +282,11 @@ Invalid trigger "<trigger>": no such column: <column>
 
 Rebuild validation includes trigger definitions. Invalid trigger SQL can cause initialization to fail rather than allowing a broken trigger to remain unnoticed.
 
-**Exact errors (`src/database.ts:721`, `724`, `732`, `807`):**
-
 ```text
 Invalid trigger definition: <trigger>
 Cannot determine event for trigger "<trigger>"
 Trigger validation failed: <error>
 ```
-
-The source also contains trigger-specific validation errors at lines 756 and 801, but their complete message strings are unavailable in the supplied excerpts.
 
 If a trigger references a removed or renamed column, update its SQL before the schema rebuild.
 
@@ -347,8 +331,6 @@ Ambiguous automatic join between '<from>' and '<to>': foreign keys <table>.<fk>,
 ```
 
 Automatic join resolution now rejects ambiguous relationships instead of relying on an arbitrary matching foreign key.
-
-The ambiguity guards are present at `src/query.ts:87` and `src/query.ts:122`. Both use multiline errors whose messages are not included in the supplied excerpts.
 
 For example:
 
@@ -418,9 +400,7 @@ db.agents
 .all();
 ```
 
-Navigation names can also acquire a `Relation` suffix when an existing field or reserved method occupies the preferred name. The suffix behavior is visible in `src/schema.ts:32`.
-
-**Exact error (`src/schema.ts:35`):**
+Navigation names can also acquire a `Relation` suffix when an existing field or reserved method occupies the preferred name.
 
 ```text
 relations: conflicting navigation accessor '<table>.<accessor>'
@@ -442,8 +422,6 @@ If a relationship definition cannot be resolved, rename the conflicting foreign-
 
 The source also validates referenced table names.
 
-**Exact errors (`src/schema.ts:43`, `46`):**
-
 ```text
 relations: unknown table '<table>'
 relations: unknown target table '<target>' in <child>.<fk>
@@ -460,8 +438,6 @@ Cannot populate required column "<table>.<column>"; add a default or use an expl
 ```
 
 Automatic reconstruction checks whether a newly required column can be populated for existing rows.
-
-The guard is present at `src/database.ts:653`, but its exact message is unavailable in the supplied excerpt.
 
 Populate the field before applying the final Zod schema.
 
@@ -503,4 +479,3 @@ Before deploying version 4.0.0:
 - [ ] Run `PRAGMA foreign_key_check` and verify indexes, triggers, foreign keys, and views after migration.
 - [ ] Confirm that failed schema migrations roll back without leaving partially reconstructed tables.
 
-The supplied throw-site excerpts establish the validation guards documented here but do not provide every multiline diagnostic, the package metadata, or a complete comparison with 3.34. Those details must be verified against the complete 4.0.0 source before publication.
