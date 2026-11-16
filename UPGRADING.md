@@ -470,6 +470,8 @@ db.users.select().whereRaw("json_extract(data, ?) = ?", ["$.name", name]).all();
 
 Unknown operators inside `$or`, malformed `$in`/`$between` values, and more than 32766 bound parameters in one statement now throw.
 
+Also now rejected with an error: an `orderBy()` direction other than `asc`/`desc`, and a `limit()` or `offset()` that is not a non-negative integer (for example a string from a query parameter: convert with `Number()` and check it first). Generated SQL quotes every identifier, so tests that compare SQL text see `"users"."name"` instead of `users.name`.
+
 ## Upgrade checklist
 
 Before deploying version 4.0.0:

@@ -6,6 +6,8 @@
 
 - Field names in `where()` (including inside `$or`) were written into SQL unquoted, so an app that let users choose the filter field was open to SQL injection. Field names are now quoted identifiers; values were always bound parameters.
 - The callback query style now quotes column names, accepts only plain identifiers as function names, and only known operators.
+- Table and column names in inserts, updates, deletes, selects, joins, `groupBy()` and `orderBy()` are quoted with embedded quotes escaped; an insert key or table name containing `"` could rewrite the statement.
+- `orderBy()` direction must be `asc` or `desc` (it was written into SQL as given); `limit()` and `offset()` must be non-negative integers.
 - Operator keys must be real operators (`$in`, not inherited names like `constructor`); `$in`, `$notIn` and `$between` inputs are validated; a statement may bind at most 32766 parameters.
 
 ### Fixed
