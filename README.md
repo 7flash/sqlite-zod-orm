@@ -164,8 +164,21 @@ If that name is a stored schema field or an entity method (`id`, `update`,
 `delete`), `Relation` is appended until the name is available. For example,
 `agentRef` stays numeric and its parent is accessed with `agentRefRelation()`.
 Inverse accessors follow the same rule: a stored `books` field is preserved
-and children are accessed with `booksRelation()`. Two relations resolving to
-the same accessor are rejected during initialization.
+and children are accessed with `booksRelation()`.
+
+When **multiple foreign keys** connect the same child table to one parent,
+**every** inverse is named `<childTable>By<FK>` (FK in PascalCase, converting
+underscores to word boundaries), independent of declaration order. For example,
+`grants.authorRef`, `grants.agentRef` and `grants.auditorRef` referencing
+`agents` produce `agents.grantsByAuthorRef()`, `grantsByAgentRef()` and
+`grantsByAuditorRef()`; each returns only children matching its own FK. A
+self-reference is also FK-qualified: `nodes.nodes_id → nodes` yields forward
+`nodes()` and inverse `nodesByNodesId()`. If an inverse name conflicts with a
+stored field, generated field, method or forward accessor, append `Relation`
+until free. Conflicting forward names are rejected. `.with()` uses the same
+inverse names (and yields arrays instead of lazy functions). Automatic joins
+are rejected when more than one FK can connect the selected tables; supply
+the FK explicitly with `.join('agents', 'authorRef', ['name'])`.
 
 ## Cascade Deletes
 

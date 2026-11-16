@@ -18,72 +18,58 @@ export function parseRelationsConfig(
   schemas: SchemaMap,
 ): Relationship[] {
   const relationships: Relationship[] = [];
-  const added = new Set<string>();
   const navigationNames = new Set<string>();
-  // Generated columns must never be replaced by lazy accessors. Reserve them
-  // independently of whether the corresponding option is currently enabled.
   const reserved = new Set([
     "id", "update", "delete", "createdAt", "updatedAt", "deletedAt",
   ]);
-  const navigationName = (table: string, base: string) => {
+  const navigationName = (table: string, base: string, inverse = false) => {
     const shape = asZodObject(schemas[table]!).shape;
     let name = base;
-    while (Object.prototype.hasOwnProperty.call(shape, name) || reserved.has(name)) {
-      name += "Relation";
-    }
+    while (
+      Object.prototype.hasOwnProperty.call(shape, name) ||
+      reserved.has(name) ||
+      (inverse && navigationNames.has(`${table}.${name}`))
+    ) name += "Relation";
     const key = `${table}.${name}`;
-    if (navigationNames.has(key)) {
+    if (navigationNames.has(key))
       throw new Error(`relations: conflicting navigation accessor '${key}'`);
-    }
     navigationNames.add(key);
     return name;
   };
 
-  for (const [fromTable, rels] of Object.entries(relations)) {
-    if (!schemas[fromTable]) {
-      throw new Error(`relations: unknown table '${fromTable}'`);
+  const entries: { child: string; parent: string; fk: string }[] = [];
+  const counts = new Map<string, number>();
+  for (const [child, rels] of Object.entries(relations)) {
+    if (!schemas[child]) throw new Error(`relations: unknown table '${child}'`);
+    for (const [fk, parent] of Object.entries(rels)) {
+      if (!schemas[parent])
+        throw new Error(`relations: unknown target table '${parent}' in ${child}.${fk}`);
+      entries.push({ child, parent, fk });
+      const key = JSON.stringify([child, parent]);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
     }
-    for (const [fkColumn, toTable] of Object.entries(rels)) {
-      if (!schemas[toTable]) {
-        throw new Error(
-          `relations: unknown target table '${toTable}' in ${fromTable}.${fkColumn}`,
-        );
-      }
+  }
 
-      // Derive navigation name: author_id → author
-      const navField = fkColumn.replace(/_id$/, "");
-
-      // belongs-to: books.author_id → authors
-      const btKey = `${fromTable}.${fkColumn}:belongs-to`;
-      if (!added.has(btKey)) {
-        relationships.push({
-          type: "belongs-to",
-          from: fromTable,
-          to: toTable,
-          relationshipField: navigationName(fromTable, navField),
-          foreignKey: fkColumn,
-        });
-        added.add(btKey);
-      }
-
-      // auto-infer one-to-many inverse: authors.books → books[]
-      const otmKey = `${toTable}.${fromTable}:one-to-many`;
-      if (added.has(otmKey)) {
-        throw new Error(
-          `relations: ambiguous inverse from '${toTable}' to '${fromTable}'; multiple foreign keys require explicit navigation`,
-        );
-      }
-      if (!added.has(otmKey)) {
-        relationships.push({
-          type: "one-to-many",
-          from: toTable,
-          to: fromTable,
-          relationshipField: navigationName(toTable, fromTable), // e.g. 'books'
-          foreignKey: "",
-        });
-        added.add(otmKey);
-      }
-    }
+  // Allocate forward names before inverse names (including self-references).
+  for (const { child, parent, fk } of entries) {
+    relationships.push({
+      type: "belongs-to", from: child, to: parent,
+      relationshipField: navigationName(child, fk.replace(/_id$/, "")),
+      foreignKey: fk,
+    });
+  }
+  for (const { child, parent, fk } of entries) {
+    // Qualify *all* inverses for a repeated child/parent pair, regardless of
+    // declaration order. Self inverses are always qualified.
+    const qualified = child === parent || counts.get(JSON.stringify([child, parent]))! > 1;
+    const base = qualified
+      ? `${child}By${fk.split("_").map((part) => part[0]?.toUpperCase() + part.slice(1)).join("")}`
+      : child;
+    relationships.push({
+      type: "one-to-many", from: parent, to: child,
+      relationshipField: navigationName(parent, base, true),
+      foreignKey: fk,
+    });
   }
 
   return relationships;

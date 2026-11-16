@@ -34,20 +34,12 @@ export function attachMethods<T extends Record<string, any>>(
       // book.author() → lazy load parent via author_id FK
       augmented[rel.relationshipField] = () => {
         const fkValue = entity[rel.foreignKey];
-        return fkValue ? getById(ctx, rel.to, fkValue) : null;
+        return fkValue == null ? null : getById(ctx, rel.to, fkValue);
       };
     } else if (rel.from === entityName && rel.type === "one-to-many") {
       // author.books() → lazy load children
-      const belongsToRel = ctx.relationships.find(
-        (r) =>
-          r.type === "belongs-to" && r.from === rel.to && r.to === rel.from,
-      );
-      if (belongsToRel) {
-        const fk = belongsToRel.foreignKey;
-        augmented[rel.relationshipField] = () => {
-          return findMany(ctx, rel.to, { [fk]: entity.id });
-        };
-      }
+      augmented[rel.relationshipField] = () =>
+        findMany(ctx, rel.to, { [rel.foreignKey]: entity.id });
     }
   }
 

@@ -325,22 +325,25 @@ class _Database<Schemas extends SchemaMap> {
               const cascadeTargets = this._ctx.cascade[entityName];
               if (cascadeTargets) {
                 for (const childTable of cascadeTargets) {
-                  const rel = this._ctx.relationships.find(
-                    (r) =>
-                      r.type === "belongs-to" &&
-                      r.from === childTable &&
-                      r.to === entityName,
+                  const rels = this._ctx.relationships.filter(
+                    (r) => r.type === "belongs-to" &&
+                      r.from === childTable && r.to === entityName,
                   );
-                  if (rel) {
+                  if (rels.length) {
+                    // A child can reference this parent through more than one FK.
+                    const clause = rels.map((r) =>
+                      `"${this.escapeIdentifier(r.foreignKey)}" = ?`,
+                    ).join(" OR ");
+                    const params = rels.map(() => id);
+                    const child = this.escapeIdentifier(childTable);
                     if (this._softDeletes) {
                       const now = new Date().toISOString();
                       this._stmt(
-                        `UPDATE "${childTable}" SET "deletedAt" = ? WHERE "${rel.foreignKey}" = ?`,
-                      ).run(now, id);
+                        `UPDATE "${child}" SET "deletedAt" = ? WHERE ${clause}`,
+                      ).run(now, ...params);
                     } else {
-                      this._stmt(
-                        `DELETE FROM "${childTable}" WHERE "${rel.foreignKey}" = ?`,
-                      ).run(id);
+                      this._stmt(`DELETE FROM "${child}" WHERE ${clause}`)
+                        .run(...params);
                     }
                   }
                 }

@@ -77,17 +77,24 @@ export function createQueryBuilder(
     fromTable: string,
     toTable: string,
   ): { fk: string; pk: string } | null => {
-    const belongsTo = ctx.relationships.find(
-      (r) =>
-        r.type === "belongs-to" && r.from === fromTable && r.to === toTable,
+    const candidates = ctx.relationships.filter(
+      (r) => r.type === "belongs-to" && (
+        (r.from === fromTable && r.to === toTable) ||
+        (r.from === toTable && r.to === fromTable)
+      ),
     );
-    if (belongsTo) return { fk: belongsTo.foreignKey, pk: "id" };
-    const reverse = ctx.relationships.find(
-      (r) =>
-        r.type === "belongs-to" && r.from === toTable && r.to === fromTable,
-    );
-    if (reverse) return { fk: "id", pk: reverse.foreignKey };
-    return null;
+    if (candidates.length > 1) {
+      throw new Error(
+        `Ambiguous automatic join between '${fromTable}' and '${toTable}': ` +
+        `foreign keys ${candidates.map((r) => `${r.from}.${r.foreignKey}`).join(", ")}. ` +
+        `Use join('${toTable}', fromColumn, columns, toColumn) to specify the join.`,
+      );
+    }
+    const rel = candidates[0];
+    if (!rel) return null;
+    return rel.from === fromTable
+      ? { fk: rel.foreignKey, pk: "id" }
+      : { fk: "id", pk: rel.foreignKey };
   };
 
   const conditionResolver = (
@@ -101,35 +108,23 @@ export function createQueryBuilder(
         typeof value.id === "number" &&
         typeof value.delete === "function"
       ) {
-        const fkCol = key + "_id";
-        const rel = ctx.relationships.find(
-          (r) =>
-            r.type === "belongs-to" &&
-            r.from === entityName &&
-            r.foreignKey === fkCol,
+        const candidates = ctx.relationships.filter(
+          (r) => r.type === "belongs-to" && r.from === entityName,
         );
-        if (rel) {
-          resolved[fkCol] = value.id;
-        } else {
-          const relByNav =
-            ctx.relationships.find(
-              (r) =>
-                r.type === "belongs-to" &&
-                r.from === entityName &&
-                r.to === key + "s",
-            ) ||
-            ctx.relationships.find(
-              (r) =>
-                r.type === "belongs-to" &&
-                r.from === entityName &&
-                r.to === key,
-            );
-          if (relByNav) {
-            resolved[relByNav.foreignKey] = value.id;
-          } else {
-            resolved[key] = value;
-          }
-        }
+        const direct = candidates.filter(
+          (r) => r.foreignKey === key || r.foreignKey === key + "_id" ||
+            r.relationshipField === key,
+        );
+        const matches = direct.length ? direct : candidates.filter(
+          (r) => r.to === key || r.to === key + "s",
+        );
+        if (matches.length > 1)
+          throw new Error(
+            `Ambiguous relationship '${key}' on '${entityName}': ` +
+            `${matches.map((r) => r.foreignKey).join(", ")}. Use the FK or navigation name.`,
+          );
+        if (matches[0]) resolved[matches[0].foreignKey] = value.id;
+        else resolved[key] = value;
       } else {
         resolved[key] = value;
       }
@@ -149,32 +144,24 @@ export function createQueryBuilder(
         r.relationshipField === relation,
     );
     if (hasMany) {
-      const belongsTo = ctx.relationships.find(
-        (r) =>
-          r.type === "belongs-to" &&
-          r.from === hasMany.to &&
-          r.to === parentTable,
-      );
-      if (belongsTo) {
-        const fk = belongsTo.foreignKey;
-        const placeholders = parentIds.map(() => "?").join(", ");
-        const childRows = ctx
-          ._stmt(`SELECT * FROM ${hasMany.to} WHERE ${fk} IN (${placeholders})`)
-          .all(...parentIds) as any[];
+      const fk = hasMany.foreignKey;
+      const placeholders = parentIds.map(() => "?").join(", ");
+      const childRows = ctx
+        ._stmt(`SELECT * FROM "${hasMany.to.replace(/"/g, '""')}" WHERE "${fk.replace(/"/g, '""')}" IN (${placeholders})`)
+        .all(...parentIds) as any[];
 
-        const groups = new Map<number, any[]>();
-        const childSchema = ctx.schemas[hasMany.to]!;
-        for (const rawRow of childRows) {
-          const entity = ctx.attachMethods(
-            hasMany.to,
-            transformFromStorage(rawRow, childSchema),
-          );
-          const parentId = rawRow[fk] as number;
-          if (!groups.has(parentId)) groups.set(parentId, []);
-          groups.get(parentId)!.push(entity);
-        }
-        return { key: relation, groups };
+      const groups = new Map<number, any[]>();
+      const childSchema = ctx.schemas[hasMany.to]!;
+      for (const rawRow of childRows) {
+        const entity = ctx.attachMethods(
+          hasMany.to,
+          transformFromStorage(rawRow, childSchema),
+        );
+        const parentId = rawRow[fk] as number;
+        if (!groups.has(parentId)) groups.set(parentId, []);
+        groups.get(parentId)!.push(entity);
       }
+      return { key: relation, groups };
     }
 
     const belongsTo = ctx.relationships.find(

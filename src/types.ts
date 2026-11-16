@@ -150,6 +150,7 @@ export type Relationship = {
   from: string;
   to: string;
   relationshipField: string;
+  /** Actual child-table FK column, for both belongs-to and one-to-many. */
   foreignKey: string;
 };
 
@@ -163,15 +164,36 @@ export type EntityData<S extends z.ZodType<any>> = Omit<InputSchema<S>, "id">;
 /** Strip `_id` suffix: `'author_id'` → `'author'` */
 type StripIdSuffix<S extends string> = S extends `${infer Base}_id` ? Base : S;
 
-/** Mirror runtime naming: preserve schema fields and entity methods. */
+/** Append Relation for columns, entity methods, or already-used forward names. */
 type NavigationName<
   S extends z.ZodType<any>,
   Name extends string,
+  Used extends string = never,
 > = string extends keyof z.infer<S>
   ? Name
-  : Name extends keyof z.infer<S> | "id" | "update" | "delete" | "createdAt" | "updatedAt" | "deletedAt"
-    ? NavigationName<S, `${Name}Relation`>
+  : Name extends keyof z.infer<S> | "id" | "update" | "delete" | "createdAt" | "updatedAt" | "deletedAt" | Used
+    ? NavigationName<S, `${Name}Relation`, Used>
     : Name;
+
+type FKsTo<Rec, Parent extends string> = {
+  [FK in Extract<keyof Rec, string>]: Rec[FK] extends Parent ? FK : never;
+}[Extract<keyof Rec, string>];
+
+type IsUnion<T, C = T> = T extends C ? [C] extends [T] ? false : true : never;
+type PascalFK<FK extends string> = FK extends `${infer Head}_${infer Tail}`
+  ? `${Capitalize<Head>}${PascalFK<Tail>}`
+  : Capitalize<FK>;
+
+type InverseBase<
+  R extends RelationsConfig,
+  Child extends keyof R & string,
+  Parent extends string,
+  FK extends string,
+> = Child extends Parent
+  ? `${Child}By${PascalFK<FK>}`
+  : IsUnion<FKsTo<R[Child], Parent>> extends true
+    ? `${Child}By${PascalFK<FK>}`
+    : Child;
 
 /**
  * Base entity type with schema fields, id, update(), delete().
@@ -201,33 +223,32 @@ type BelongsToNav<
     }
   : {};
 
-/**
- * Has-many nav methods for a table.
- * If `books: { author_id: 'authors' }`, then `authors` gets `{ books: () => BaseEntity<BookSchema>[] }`
- *
- * We use key remapping in a mapped type: for each child table in R,
- * check if ParentTable appears in its FK target values.
- */
+/** Has-many accessors are keyed by each specific child FK, not table pair. */
+type HasManyForChild<
+  S extends SchemaMap,
+  R extends RelationsConfig,
+  Parent extends string,
+  Child extends Extract<keyof R & keyof S, string>,
+> = {
+  readonly [FK in FKsTo<R[Child], Parent> as NavigationName<
+    S[Parent & keyof S],
+    InverseBase<R, Child, Parent, FK>,
+    Extract<keyof BelongsToNav<S, R, Parent>, string>
+  >]: () => BaseEntity<S[Child]>[];
+};
+
+type UnionToIntersection<U> = (
+  U extends unknown ? (value: U) => void : never
+) extends ((value: infer I) => void) ? I : {};
+
 type HasManyNav<
   S extends SchemaMap,
   R extends RelationsConfig,
-  ParentTable extends string,
-> = {
-  readonly [
-    ChildTable in Extract<keyof R & keyof S, string> as _FKTargetsContain<
-      R[ChildTable],
-      ParentTable
-    > extends true
-      ? NavigationName<S[ParentTable & keyof S], ChildTable>
-      : never
-  ]: () => BaseEntity<S[ChildTable]>[];
-};
-
-/** Check if any value in record Rec equals Target */
-type _FKTargetsContain<
-  Rec,
-  Target extends string,
-> = Target extends Rec[keyof Rec] ? true : false;
+  Parent extends string,
+> = UnionToIntersection<{
+  [Child in Extract<keyof R & keyof S, string>]:
+    HasManyForChild<S, R, Parent, Child>;
+}[Extract<keyof R & keyof S, string>]>;
 
 // =============================================================================
 // NavEntity — Full entity type with nav methods (one level deep)
