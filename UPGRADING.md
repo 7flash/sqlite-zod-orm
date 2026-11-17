@@ -480,6 +480,17 @@ An `async` `beforeInsert`, `beforeUpdate` or `beforeDelete` now throws `Lifecycl
 
 `db.transaction(async () => ...)` now throws `db.transaction() callback must be synchronous`. It never did what it looked like: SQLite committed at the first `await`. Do async work (fetches, file reads) before the transaction, then write inside a synchronous callback.
 
+## 14. Combined filters and soft-deleted rows
+
+A query with both a callback filter and an object filter now applies both:
+
+```ts
+db.users.select().where({ role: "admin" }).where((c, f) => op.gt(c.age, 30)).all();
+// 3.x ignored { role: "admin" }; 4.0 returns admins over 30
+```
+
+With `softDeletes` on, `get(id)`, joins, `.with()` and relation accessors no longer return deleted rows, and `upsert` restores a soft-deleted row with the same key instead of inserting a new one. Code that relied on seeing deleted rows through these paths must opt in explicitly.
+
 ## Upgrade checklist
 
 Before deploying version 4.0.0:
