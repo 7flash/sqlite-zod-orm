@@ -77,8 +77,10 @@ Examples:
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
+  // `sqlite-zod-orm --help` (help before any command) shows the usage.
+  const helpFirst = argv[0] === "-h" || argv[0] === "--help" || argv[0] === "help";
   const parsed: ParsedArgs = {
-    command: argv[0] ?? null,
+    command: helpFirst ? null : (argv[0] ?? null),
     modulePath: null,
     dryRun: false,
     yes: false,

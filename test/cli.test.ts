@@ -125,3 +125,19 @@ test("quoted paths with spaces and --yes apply successfully", async () => {
 
 // Not tested here: --dry-run with --save on the interactive planning path
 // (it prompts on stdin); the code skips the save when dryRun is set.
+
+test("--help, -h and help before a command print the usage", async () => {
+  for (const flag of ["--help", "-h", "help"]) {
+    const logs: string[] = [];
+    const log = console.log;
+    console.log = (...parts: unknown[]) => { logs.push(parts.join(" ")); };
+    try {
+      process.exitCode = 0;
+      await runCli([flag]);
+    } finally {
+      console.log = log;
+    }
+    expect(logs.join("\n")).toContain("Usage:");
+    expect(process.exitCode).toBe(0);
+  }
+});
