@@ -999,6 +999,20 @@ class _Database<Schemas extends SchemaMap> {
     );
   }
 
+  /** Run one listener; a throw or a rejected promise never stops dispatch. */
+  private _callListener(listener: Listener, payload: unknown): void {
+    try {
+      const result = (listener.callback as (row: unknown) => unknown)(payload);
+      if (result && typeof (result as PromiseLike<unknown>).then === "function") {
+        Promise.resolve(result).catch((error) => {
+          console.error(`[sqlite-zod-orm] ${listener.table}.on("${listener.event}") listener failed:`, error);
+        });
+      }
+    } catch (error) {
+      console.error(`[sqlite-zod-orm] ${listener.table}.on("${listener.event}") listener failed:`, error);
+    }
+  }
+
   private _stopPolling(): void {
     if (this._pollTimer) {
       clearInterval(this._pollTimer);
@@ -1034,27 +1048,15 @@ class _Database<Schemas extends SchemaMap> {
       );
 
       if (listeners.length > 0) {
-        if (change.op === "delete") {
-          // Row is gone — pass just the id
-          const payload = { id: change.row_id };
+        const payload =
+          change.op === "delete"
+            ? { id: change.row_id } // the row is gone: pass just the id
+            : getById(this._ctx, change.tbl, change.row_id); // re-fetch the current row
+        if (payload) {
           for (const l of listeners) {
-            try {
-              l.callback(payload);
-            } catch {
-              /* listener error */
-            }
-          }
-        } else {
-          // insert or update — re-fetch the current row
-          const row = getById(this._ctx, change.tbl, change.row_id);
-          if (row) {
-            for (const l of listeners) {
-              try {
-                l.callback(row);
-              } catch {
-                /* listener error */
-              }
-            }
+            // A listener removed by an earlier listener in this dispatch is skipped.
+            if (!this._listeners.includes(l)) continue;
+            this._callListener(l, payload);
           }
         }
       }
