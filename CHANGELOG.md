@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Cascade deletes go through every level, handle self-references and cycles, run each row's hooks once (`beforeDelete` was called twice through `db.table.delete(id)`), soft-delete the whole tree, and roll back entirely if a child's `beforeDelete` vetoes or throws.
 - Soft deletes: `get(id)`, joins, `.with()` and relation accessors no longer return deleted rows, and `upsert` restores a soft-deleted row instead of inserting a duplicate.
 - Type declarations use explicit `.js` import paths, so projects on `moduleResolution: node16`/`nodenext` get the package's types (TS2834 before).
 - Change listeners: an async listener that rejects no longer causes an unhandled rejection, and unsubscribing a listener from inside another listener takes effect for the change being dispatched.
