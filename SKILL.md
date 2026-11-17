@@ -293,6 +293,8 @@ const hookedDb = new Database(':memory:', {
     afterUpdate: (entity) => { /* audit entity.id */ },
     beforeDelete: (id) => true, // return false to cancel
     afterDelete: (id) => { /* audit deletion */ },
+    beforeRestore: (id) => {}, // softDeletes; return false to cancel
+    afterRestore: (id) => {},
   } },
 });
 ```

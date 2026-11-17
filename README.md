@@ -440,6 +440,8 @@ const db = new Database(':memory:', { users: UserSchema }, {
             afterUpdate: (entity) => {},
             beforeDelete: (id) => true,  // return false to cancel
             afterDelete: (id) => {},
+            beforeRestore: (id) => {},   // softDeletes; return false to cancel
+            afterRestore: (id) => {},
         },
     },
 });
