@@ -64,13 +64,19 @@ function invokeHookSync<T>(
 // Read helpers
 // ---------------------------------------------------------------------------
 
+function visibleWhere(ctx: DatabaseContext, table: string, clause: string, trashed = false): string {
+  if (!ctx.softDeletes || ctx.viewNames.has(table) || trashed) return clause;
+  return `${clause}${clause ? " AND" : "WHERE"} "deletedAt" IS NULL`;
+}
+
 export function getById(
   ctx: DatabaseContext,
   entityName: string,
   id: number,
+  includeDeleted = false,
 ): AugmentedEntity<any> | null {
   const row = ctx
-    ._stmt(`SELECT * FROM ${qi(entityName)} WHERE id = ?`)
+    ._stmt(`SELECT * FROM ${qi(entityName)} ${visibleWhere(ctx, entityName, "WHERE id = ?", includeDeleted)}`)
     .get(id) as any;
   if (!row) return null;
   return ctx.attachMethods(
@@ -83,10 +89,11 @@ export function getOne(
   ctx: DatabaseContext,
   entityName: string,
   conditions: Record<string, any>,
+  includeDeleted = false,
 ): AugmentedEntity<any> | null {
   const { clause, values } = ctx.buildWhereClause(conditions);
   const row = ctx
-    ._stmt(`SELECT * FROM ${qi(entityName)} ${clause} LIMIT 1`)
+    ._stmt(`SELECT * FROM ${qi(entityName)} ${visibleWhere(ctx, entityName, clause, includeDeleted)} LIMIT 1`)
     .get(...values) as any;
   if (!row) return null;
   return ctx.attachMethods(
@@ -102,7 +109,7 @@ export function findMany(
 ): AugmentedEntity<any>[] {
   const { clause, values } = ctx.buildWhereClause(conditions);
   const rows = ctx
-    ._stmt(`SELECT * FROM ${qi(entityName)} ${clause}`)
+    ._stmt(`SELECT * FROM ${qi(entityName)} ${visibleWhere(ctx, entityName, clause)}`)
     .all(...values);
   return rows.map((row: any) =>
     ctx.attachMethods(
@@ -208,7 +215,7 @@ export function update<T extends Record<string, any>>(
   const setClause = Object.keys(transformed)
     .map((key) => `${qi(key)} = ?`)
     .join(", ");
-  const sql = `UPDATE ${qi(entityName)} SET ${setClause} WHERE id = ?`;
+  const sql = `UPDATE ${qi(entityName)} SET ${setClause} ${visibleWhere(ctx, entityName, "WHERE id = ?")}`;
   ctx._m(`SQL: UPDATE ${entityName} SET ...`, () => {
     ctx._stmt(sql).run(...Object.values(transformed), id);
   });
@@ -242,7 +249,7 @@ export function updateWhere(
   const setCols = Object.keys(transformed);
   const setClause = setCols.map((key) => `${qi(key)} = ?`).join(", ");
   const result = ctx
-    ._stmt(`UPDATE ${qi(entityName)} SET ${setClause} ${clause}`)
+    ._stmt(`UPDATE ${qi(entityName)} SET ${setClause} ${visibleWhere(ctx, entityName, clause)}`)
     .run(...setCols.map((key) => transformed[key]), ...whereValues);
 
   return (result as any).changes ?? 0;
@@ -275,12 +282,15 @@ export function upsert<T extends Record<string, any>>(
   const txn = ctx.db.transaction(() => {
     const hasId = data?.id && typeof data.id === "number";
     const existing = hasId
-      ? getById(ctx, entityName, data.id)
+      ? getById(ctx, entityName, data.id, true)
       : Object.keys(conditions ?? {}).length > 0
-        ? getOne(ctx, entityName, conditions)
+        ? getOne(ctx, entityName, conditions, true)
         : null;
 
     if (existing) {
+      // Reuse the unique key rather than inserting into a retained unique index.
+      if (ctx.softDeletes && existing.deletedAt != null)
+        ctx._stmt(`UPDATE ${qi(entityName)} SET "deletedAt" = NULL WHERE id = ?`).run(existing.id);
       const updateData = { ...data };
       delete updateData.id;
       const entity = update(
@@ -344,10 +354,27 @@ export function deleteEntity(
     if (result === false) return;
   }
 
-  ctx._stmt(`DELETE FROM ${qi(entityName)} WHERE id = ?`).run(id);
+  const changed = ctx.db.transaction(() => {
+    if (!getById(ctx, entityName, id)) return false;
+    const now = new Date().toISOString();
+    for (const child of ctx.cascade[entityName] ?? []) {
+      const rel = ctx.relationships.find(
+        (r) => r.type === "belongs-to" && r.from === child && r.to === entityName,
+      );
+      if (!rel) continue;
+      if (ctx.softDeletes)
+        ctx._stmt(`UPDATE ${qi(child)} SET "deletedAt" = ? WHERE ${qi(rel.foreignKey)} = ? AND "deletedAt" IS NULL`).run(now, id);
+      else
+        ctx._stmt(`DELETE FROM ${qi(child)} WHERE ${qi(rel.foreignKey)} = ?`).run(id);
+    }
+    const result = ctx.softDeletes
+      ? ctx._stmt(`UPDATE ${qi(entityName)} SET "deletedAt" = ? WHERE id = ? AND "deletedAt" IS NULL`).run(now, id)
+      : ctx._stmt(`DELETE FROM ${qi(entityName)} WHERE id = ?`).run(id);
+    return result.changes > 0;
+  }).immediate();
 
   // afterDelete hook
-  if (hooks?.afterDelete)
+  if (changed && hooks?.afterDelete)
     invokeHookSync(ctx, entityName, "afterDelete", () =>
       hooks.afterDelete!(id));
 }
@@ -365,7 +392,7 @@ export function deleteWhere(
   if (ctx.softDeletes) {
     // Soft delete: set deletedAt instead of removing rows
     const now = new Date().toISOString();
-    const sql = `UPDATE ${qi(entityName)} SET "deletedAt" = ? ${clause}`;
+    const sql = `UPDATE ${qi(entityName)} SET "deletedAt" = ? ${clause} AND "deletedAt" IS NULL`;
     const result = ctx._m(`SQL: ${sql.slice(0, 50)}`, () =>
       ctx._stmt(sql).run(now, ...values),
     );

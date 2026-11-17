@@ -57,6 +57,7 @@ export interface IQO {
   rawWheres: { sql: string; params: any[] }[]; // Raw WHERE fragments
   whereAST: ASTNode | null;
   joins: JoinClause[];
+  softDeleteTables?: string[];
   groupBy: string[];
   having: WhereCondition[];
   limit: number | null;
@@ -179,15 +180,18 @@ export function compileIQO(
   // JOIN clauses
   for (const j of iqo.joins) {
     sql += ` JOIN ${quoteIdentifierPath(j.table)} ON ${quoteIdentifierPath(tableName)}.${quoteIdentifierPath(j.fromCol)} = ${quoteIdentifierPath(j.table)}.${quoteIdentifierPath(j.toCol)}`;
+    if (iqo.softDeleteTables?.includes(j.table))
+      sql += ` AND ${quoteIdentifierPath(j.table)}."deletedAt" IS NULL`;
   }
 
-  // WHERE clause — AST-based takes precedence if set
+  // AST and object filters are both mandatory (including the visibility scope).
   if (iqo.whereAST) {
     // AST compiler validates and quotes its own identifiers/operators.
     const compiled = compileAST(iqo.whereAST);
     sql += ` WHERE ${compiled.sql}`;
     params.push(...compiled.params);
-  } else if (iqo.wheres.length > 0) {
+  }
+  if (iqo.wheres.length > 0) {
     const hasJoins = iqo.joins.length > 0;
     const qualify = (field: string) =>
       hasJoins && !field.includes(".") ? `${tableName}.${field}` : field;
@@ -199,7 +203,7 @@ export function compileIQO(
       if (part) whereParts.push(part);
     }
     if (whereParts.length > 0) {
-      sql += ` WHERE ${whereParts.join(" AND ")}`;
+      sql += `${sql.includes(" WHERE ") ? " AND " : " WHERE "}${whereParts.join(" AND ")}`;
     }
   }
 

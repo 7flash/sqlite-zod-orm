@@ -55,6 +55,25 @@ export function createQueryBuilder(
   const schema = ctx.schemas[entityName]!;
 
   const executor = (sql: string, params: any[], raw: boolean): any[] => {
+    // QueryBuilder.deleteAll() must tombstone parent and cascaded children.
+    const table = `"${entityName.replace(/"/g, '""')}"`;
+    const prefix = `DELETE FROM ${table} WHERE `;
+    if (ctx.softDeletes && sql.startsWith(prefix)) {
+      const where = sql.slice(prefix.length) + ` AND "deletedAt" IS NULL`;
+      const now = new Date().toISOString();
+      return ctx.db.transaction(() => {
+        for (const child of ctx.cascade[entityName] ?? []) {
+          const rel = ctx.relationships.find(
+            (r) => r.type === "belongs-to" && r.from === child && r.to === entityName,
+          );
+          if (!rel) continue;
+          const childTable = `"${child.replace(/"/g, '""')}"`;
+          const fk = `"${rel.foreignKey.replace(/"/g, '""')}"`;
+          ctx._stmt(`UPDATE ${childTable} SET "deletedAt" = ? WHERE ${fk} IN (SELECT id FROM ${table} WHERE ${where}) AND "deletedAt" IS NULL`).run(now, ...params);
+        }
+        return ctx._stmt(`UPDATE ${table} SET "deletedAt" = ? WHERE ${where}`).all(now, ...params);
+      }).immediate();
+    }
     return ctx._m(`SQL: ${sql.slice(0, 60)}`, () => {
       const rows = ctx._stmt(sql).all(...params);
       if (raw) return rows;
@@ -147,7 +166,7 @@ export function createQueryBuilder(
       const fk = hasMany.foreignKey;
       const placeholders = parentIds.map(() => "?").join(", ");
       const childRows = ctx
-        ._stmt(`SELECT * FROM "${hasMany.to.replace(/"/g, '""')}" WHERE "${fk.replace(/"/g, '""')}" IN (${placeholders})`)
+        ._stmt(`SELECT * FROM "${hasMany.to.replace(/"/g, '""')}" WHERE "${fk.replace(/"/g, '""')}" IN (${placeholders})${ctx.softDeletes && !ctx.viewNames.has(hasMany.to) ? ' AND "deletedAt" IS NULL' : ''}`)
         .all(...parentIds) as any[];
 
       const groups = new Map<number, any[]>();
@@ -185,6 +204,9 @@ export function createQueryBuilder(
     conditionResolver,
     eagerLoader,
   );
+  // Join targets, including explicit joins, must also be live tables.
+  (builder as any).iqo.softDeleteTables = ctx.softDeletes
+    ? Object.keys(ctx.schemas).filter((name) => !ctx.viewNames.has(name)) : [];
   if (initialCols.length > 0) builder.select(...initialCols);
 
   // Auto-filter soft-deleted rows unless withTrashed() is called

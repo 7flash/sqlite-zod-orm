@@ -138,7 +138,7 @@ test("compileIQO: ORDER BY, LIMIT, OFFSET", () => {
   );
 });
 
-test("compileIQO: AST-based WHERE takes precedence over object wheres", () => {
+test("compileIQO: AST and object WHERE filters are both applied", () => {
   const { sql, params } = compileIQO("users", {
     selects: [],
     wheres: [{ field: "name", operator: "=", value: "IGNORED" }],
@@ -160,9 +160,10 @@ test("compileIQO: AST-based WHERE takes precedence over object wheres", () => {
     having: [],
     distinct: false,
   });
+  // Both filters apply: a filter the caller wrote is never dropped silently.
   expect(sql).toContain('("age" = ?)');
-  expect(sql).not.toContain("IGNORED");
-  expect(params).toEqual([30]);
+  expect(sql).toContain('"name" = ?');
+  expect(params).toEqual([30, "IGNORED"]);
 });
 
 test("compileIQO: Date values get ISO-stringified", () => {
