@@ -533,6 +533,8 @@ db.raw<User>('SELECT * FROM users WHERE score > ?', 50);
 db.exec('UPDATE users SET score = 0 WHERE role = ?', 'guest');
 ```
 
+`raw()` returns rows as SQLite stores them: booleans are `0`/`1`, and JSON, dates and big integers are text. The type parameter is only a TypeScript hint, not a conversion. Writes through `exec()` still notify change listeners.
+
 Raw WHERE fragments are also supported through `whereRaw()`.
 
 This is an escape hatch, not a requirement for using the ORM.
