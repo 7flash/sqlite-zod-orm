@@ -503,6 +503,10 @@ With `softDeletes` on, `get(id)`, joins, `.with()` and relation accessors no lon
 
 `restore(id)` now also restores the children that were soft-deleted together with the row (same `deletedAt`), throws for an id that does not exist, and refuses to restore a row whose parent is still deleted. Restore the parent first, or restore through the parent.
 
+## 18. Aggregates on grouped queries
+
+`select().groupBy("x").count()` now returns the number of groups; it used to return the row count of the first group. `sum`, `avg`, `min` and `max` on a grouped query now throw (they returned the first group's value). Use `countGrouped()`, or `select()` with your own aggregate per group.
+
 ## Upgrade checklist
 
 Before deploying version 4.0.0:
