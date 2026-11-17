@@ -119,6 +119,7 @@ export class QueryBuilder<
       selects: [],
       wheres: [],
       whereOrs: [],
+      whereOrBranches: [],
       rawWheres: [],
       whereAST: null,
       joins: [],
@@ -188,11 +189,18 @@ export class QueryBuilder<
 
       for (const [key, value] of Object.entries(resolved)) {
         if (key === "$or" && Array.isArray(value)) {
-          const orConditions: WhereCondition[] = [];
+          if (value.length === 0) {
+            this.iqo.rawWheres.push({ sql: "1 = 0", params: [] });
+            continue;
+          }
+          const orBranches: WhereCondition[][] = [];
           for (const branch of value as Record<string, any>[]) {
+            if (!branch || typeof branch !== "object" || Array.isArray(branch) || Object.keys(branch).length === 0)
+              throw new Error("$or requires non-empty object branches");
             const resolvedBranch = this.conditionResolver
               ? this.conditionResolver(branch)
               : branch;
+            const branchConditions: WhereCondition[] = [];
             for (const [bKey, bValue] of Object.entries(resolvedBranch)) {
               if (
                 typeof bValue === "object" &&
@@ -203,24 +211,27 @@ export class QueryBuilder<
                 for (const [opKey, operand] of Object.entries(bValue)) {
                   if (!Object.prototype.hasOwnProperty.call(OPERATOR_MAP, opKey))
                     throw new Error(`Unsupported query operator: '${opKey}'`);
-                  orConditions.push({
+                  branchConditions.push({
                     field: bKey,
                     operator: OPERATOR_MAP[opKey as WhereOperator] as WhereCondition["operator"],
                     value: operand,
                   });
                 }
               } else {
-                orConditions.push({
+                branchConditions.push({
                   field: bKey,
                   operator: "=",
                   value: bValue,
                 });
               }
             }
+            if (branchConditions.length) orBranches.push(branchConditions);
           }
-          if (orConditions.length > 0) this.iqo.whereOrs.push(orConditions);
+          if (orBranches.length > 0) this.iqo.whereOrBranches!.push(orBranches);
           continue;
         }
+        if (key.startsWith("$"))
+          throw new Error(`Unsupported query operator: '${key}'`);
 
         if (
           typeof value === "object" &&
@@ -548,13 +559,11 @@ export class QueryBuilder<
   /** Returns true if at least one row matches the query. */
   exists(): boolean {
     const { sql: selectSql, params } = compileIQO(this.tableName, this.iqo);
-    const existsSql =
-      selectSql
-        .replace(/^SELECT .+? FROM/, "SELECT 1 FROM")
-        .replace(/ LIMIT \d+/, "") + " LIMIT 1";
+    // Preserve the original query's LIMIT/OFFSET, grouping and JOIN semantics.
+    const existsSql = `SELECT EXISTS(${selectSql}) AS present`;
     return this._cached("exists", existsSql, params, true, () => {
       const results = this.executor(existsSql, params, true);
-      return results.length > 0;
+      return Boolean((results[0] as any)?.present);
     });
   }
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.0.8 (2026-11-18)
+
+Found by a differential query matrix (`test/query-matrix.test.ts`, 3,072 seeded queries over 8 column types and every where operator, each compared with a hand-written SQL statement on the same data). These bugs date back to 3.x:
+
+- Fixed: bulk `update().where().exec()` and `delete().where().exec()` used only the first operator of a field, so `{ age: { $gte: 10, $lt: 20 } }` became `age >= 10` and changed or deleted rows outside the range. All operators now apply, as they already did in `select()`.
+- Fixed: `select().where({ $or: [...] })` flattened every branch into one OR, so `$or: [{ name: "A", active: true }, ...]` matched rows meeting any single condition. Each branch is now an AND of its conditions.
+- Fixed: `$or: []` matched every row; it now matches none. A branch that is empty or not an object throws.
+- Changed: `where({ field: null })` now means `IS NULL` and `{ $ne: null }` means `IS NOT NULL`, in reads and in bulk writes. Before, both matched no rows.
+- Changed: an unknown `$` key in `where()` (for example `$and`) throws. Before, it was silently ignored, which widened the filter.
+- Fixed: `exists()` after `offset()` threw a SQL syntax error, and ignored the query's limit and offset.
+- Fixed: bigint and JSON (object or array) filter values are compared in the form they are stored in.
+
 ## 4.0.7 (2026-11-18)
 
 Found by a lifecycle test matrix (`test/lifecycle-matrix.test.ts`, 2,048 seeded sequences of up to 30 inserts, updates, upserts, deletes, soft deletes, restores, vetoing hooks and transactions over a 4-level tree, a self-reference and a many-to-many, checked after every step against a model of what each table should hold):

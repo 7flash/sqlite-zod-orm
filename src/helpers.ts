@@ -22,12 +22,18 @@ export function buildWhereClause(
   const parts: string[] = [];
   const values: any[] = [];
 
-  for (const key in conditions) {
+  for (const key of Object.keys(conditions)) {
     if (key.startsWith("$")) {
       if (key === "$or" && Array.isArray(conditions[key])) {
         const orBranches = conditions[key] as Record<string, any>[];
+        if (orBranches.length === 0) {
+          parts.push("1 = 0");
+          continue;
+        }
         const orParts: string[] = [];
         for (const branch of orBranches) {
+          if (!branch || typeof branch !== "object" || Array.isArray(branch) || Object.keys(branch).length === 0)
+            throw new Error("$or requires non-empty object branches");
           const sub = buildWhereClause(branch, tablePrefix);
           if (sub.clause) {
             orParts.push(`(${sub.clause.replace(/^WHERE /, "")})`);
@@ -35,11 +41,14 @@ export function buildWhereClause(
           }
         }
         if (orParts.length > 0) parts.push(`(${orParts.join(" OR ")})`);
+      } else {
+        throw new Error(`Unsupported query operator: '${key}'`);
       }
       continue;
     }
     const value = conditions[key];
-    const fieldName = tablePrefix ? `"${tablePrefix}"."${key}"` : `"${key}"`;
+    const quote = (name: string) => `"${name.replace(/"/g, '""')}"`;
+    const fieldName = tablePrefix ? `${quote(tablePrefix)}.${quote(key)}` : quote(key);
 
     if (
       typeof value === "object" &&
@@ -47,12 +56,13 @@ export function buildWhereClause(
       !Array.isArray(value) &&
       !(value instanceof Date)
     ) {
-      const operator = Object.keys(value)[0];
-      if (!operator?.startsWith("$")) {
+      const operators = Object.keys(value);
+      if (!operators.length || operators.some((operator) => !operator.startsWith("$"))) {
         throw new Error(
           `Querying on nested object '${key}' not supported. Use operators like $gt.`,
         );
       }
+      for (const operator of operators) {
       const operand = value[operator];
 
       if (operator === "$in") {
@@ -113,11 +123,20 @@ export function buildWhereClause(
       )[operator];
       if (!sqlOp)
         throw new Error(`Unsupported operator '${operator}' on '${key}'`);
-      parts.push(`${fieldName} ${sqlOp} ?`);
-      values.push(transformForStorage({ operand }).operand);
+      if (operand === null && operator === "$ne") {
+        parts.push(`${fieldName} IS NOT NULL`);
+      } else {
+        parts.push(`${fieldName} ${sqlOp} ?`);
+        values.push(transformForStorage({ operand }).operand);
+      }
+      }
     } else {
-      parts.push(`${fieldName} = ?`);
-      values.push(transformForStorage({ value }).value);
+      if (value === null) {
+        parts.push(`${fieldName} IS NULL`);
+      } else {
+        parts.push(`${fieldName} = ?`);
+        values.push(transformForStorage({ value }).value);
+      }
     }
   }
 

@@ -53,7 +53,8 @@ export interface JoinClause {
 export interface IQO {
   selects: string[];
   wheres: WhereCondition[];
-  whereOrs: WhereCondition[][]; // Each sub-array is an OR group
+  whereOrs: WhereCondition[][]; // Legacy flat OR groups (preserved for external IQO callers)
+  whereOrBranches?: WhereCondition[][][]; // OR-of-AND groups for object-style $or
   rawWheres: { sql: string; params: any[] }[]; // Raw WHERE fragments
   whereAST: ASTNode | null;
   joins: JoinClause[];
@@ -135,6 +136,8 @@ function compileWhereCondition(
     return `${field} ${w.operator}`;
   if (!SCALAR_OPERATORS.has(w.operator))
     throw new Error(`Unsupported SQL WHERE operator: ${w.operator}`);
+  if (w.value === null && (w.operator === "=" || w.operator === "!="))
+    return `${field} IS ${w.operator === "!=" ? "NOT " : ""}NULL`;
   params.push(transformValueForStorage(w.value));
   return `${field} ${w.operator} ?`;
 }
@@ -142,6 +145,9 @@ function compileWhereCondition(
 export function transformValueForStorage(value: any): any {
   if (value instanceof Date) return value.toISOString();
   if (typeof value === "boolean") return value ? 1 : 0;
+  if (typeof value === "bigint") return value.toString();
+  if (value !== null && typeof value === "object" && !(value instanceof Uint8Array))
+    return JSON.stringify(value, (_key, v) => typeof v === "bigint" ? v.toString() : v);
   return value;
 }
 
@@ -207,7 +213,7 @@ export function compileIQO(
     }
   }
 
-  // Append OR groups (from $or)
+  // Legacy IQO OR groups remain supported for callers constructing IQO directly.
   if (iqo.whereOrs.length > 0) {
     const hasJoins = iqo.joins.length > 0;
     for (const orGroup of iqo.whereOrs) {
@@ -215,17 +221,30 @@ export function compileIQO(
       for (const w of orGroup) {
         const field = hasJoins && !w.field.includes(".")
           ? `${tableName}.${w.field}` : w.field;
-        const part = compileWhereCondition(
-          w, quoteIdentifierPath(field), params,
-        );
+        const part = compileWhereCondition(w, quoteIdentifierPath(field), params);
         if (part) orParts.push(part);
       }
       if (orParts.length > 0) {
-        const orClause = `(${orParts.join(" OR ")})`;
-        sql += sql.includes(" WHERE ")
-          ? ` AND ${orClause}`
-          : ` WHERE ${orClause}`;
+        sql += `${sql.includes(" WHERE ") ? " AND " : " WHERE "}(${orParts.join(" OR ")})`;
       }
+    }
+  }
+
+  // Preserve AND within each branch of fluent object-style $or.
+  for (const orGroup of iqo.whereOrBranches ?? []) {
+    const orParts: string[] = [];
+    for (const branch of orGroup) {
+      const andParts: string[] = [];
+      for (const w of branch) {
+        const field = iqo.joins.length > 0 && !w.field.includes(".")
+          ? `${tableName}.${w.field}` : w.field;
+        const part = compileWhereCondition(w, quoteIdentifierPath(field), params);
+        if (part) andParts.push(part);
+      }
+      orParts.push(andParts.length ? `(${andParts.join(" AND ")})` : "(1 = 1)");
+    }
+    if (orParts.length > 0) {
+      sql += `${sql.includes(" WHERE ") ? " AND " : " WHERE "}(${orParts.join(" OR ")})`;
     }
   }
 
