@@ -1,5 +1,10 @@
 # Changelog
 
+## 4.0.4 (2026-11-18)
+
+- UPGRADING.md section 21: the exported `z` is Zod 4 (3.x used Zod 3), and what that changes for app schemas.
+- `upgrade-check` now reports one-argument `z.record()` and the Zod 3 error options `invalid_type_error` / `required_error`. Reported by the hardware ray.
+
 ## 4.0.3 (2026-11-18)
 
 - **Fixed data loss:** a partial `update(id, fields)` or `update(fields).where(...).exec()` reset every field it left out that has a `.default()` back to that default (Zod 4 fills defaults even under `.partial()`). Only the fields you pass are written now. 4.0.0 to 4.0.2 are deprecated because of this; upgrade straight to 4.0.3. Reported by the toolset ray (prompt-proxy lost saved replies).

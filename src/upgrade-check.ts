@@ -100,6 +100,19 @@ const RULES: Rule[] = [
     pattern: /\bsoftDeletes\s*:\s*true\b/,
     message: "with softDeletes, get(), joins, .with() and relation accessors no longer return deleted rows",
   },
+  {
+    section: 21,
+    severity: "error",
+    // One argument (a single schema expression) means no key schema.
+    pattern: /\bz\.record\(\s*z\.[\w.]+\((?:[^()]|\([^()]*\))*\)(?:\.\w+\((?:[^()]|\([^()]*\))*\))*\s*\)/,
+    message: "z.record() with one argument: Zod 4 needs a key schema, e.g. z.record(z.string(), ...)",
+  },
+  {
+    section: 21,
+    severity: "error",
+    pattern: /\b(?:invalid_type_error|required_error)\s*:/,
+    message: "Zod 3 error option: Zod 4 uses { error: \"...\" } instead",
+  },
 ];
 
 const SOURCE = /\.(?:[cm]?[jt]sx?)$/;

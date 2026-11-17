@@ -529,6 +529,18 @@ With `softDeletes` on, `get(id)`, joins, `.with()` and relation accessors no lon
 
 A `cascade` entry whose table does not exist, or whose child has no `relations` entry pointing at the parent, now throws when the database opens. Before, such an entry was accepted and never cascaded. Fix the name, or add the missing relation.
 
+## 21. `z` is now Zod 4
+
+sqlite-zod-orm 3.x used Zod 3. 4.0 uses Zod 4 (`^4.6.7`), and the `z` it exports is Zod 4. Schemas written for Zod 3 mostly keep working, but these changes break type checks or behaviour. The full list is in the [Zod 4 changelog](https://zod.dev/v4/changelog).
+
+- **`z.record()` needs a key schema.** `z.record(z.unknown())` becomes `z.record(z.string(), z.unknown())`. `upgrade-check` reports the one-argument form.
+- **Error options are renamed.** `{ message }`, `{ invalid_type_error }` and `{ required_error }` become `{ error: "..." }` or `{ error: (issue) => ... }`. `upgrade-check` reports `invalid_type_error` and `required_error`.
+- **`ZodError.errors` is gone.** Read `error.issues`.
+- **`.default()` applies when a value is missing, even under `.optional()` or `.partial()`.** The ORM's own partial updates handle this as of 4.0.3; in your own `.partial().parse()` calls, a left-out field comes back with its default.
+- **Deprecated but still working:** `z.nativeEnum()` (use `z.enum()`), `.merge()` (use `.extend()`), `.strict()` and `.passthrough()` (use `z.strictObject()` and `z.looseObject()`), and string formats such as `z.string().email()` (use `z.email()`).
+
+Run `bunx tsc --noEmit` after upgrading: most of these show up as type errors.
+
 ## Upgrade checklist
 
 Before deploying version 4.0.0:
@@ -543,7 +555,7 @@ Before deploying version 4.0.0:
 - [ ] Update inverse accessor names and `.with()` expressions where multiple foreign keys reference the same parent table.
 - [ ] Review conflicting navigation accessors and relationship configurations.
 - [ ] Review package imports and runtime dependencies against the final 4.0.0 package metadata.
-- [ ] Run TypeScript validation with `bunx tsc --noEmit`.
+- [ ] Move Zod 3 schemas to Zod 4 (section 21), then run TypeScript validation with `bunx tsc --noEmit`.
 - [ ] Run application tests covering CRUD operations, joins, eager loading, and relationship navigation.
 - [ ] Run `PRAGMA foreign_key_check` and verify indexes, triggers, foreign keys, and views after migration.
 - [ ] Confirm that failed schema migrations roll back without leaving partially reconstructed tables.

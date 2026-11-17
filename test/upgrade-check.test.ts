@@ -33,3 +33,18 @@ test("the CLI exits 1 when something must change and prints JSON on request", as
   const parsed = JSON.parse(new TextDecoder().decode(run.stdout));
   expect(parsed.length).toBe(12);
 });
+
+test("Zod 3 patterns: one-argument z.record and old error options", () => {
+  const src = [
+    'import { z } from "sqlite-zod-orm";',
+    "const a = z.record(z.unknown());",
+    "const b = z.record(z.string(), z.unknown());",
+    "const c = z.record(z.object({ x: z.number() }).optional());",
+    "const d = z.record(z.string(), z.array(z.string()));",
+    'const e = z.string({ required_error: "needed" });',
+    'const f = z.number({ invalid_type_error: "num" });',
+    'const g = z.string({ error: "fine" });',
+  ].join("\n");
+  const lines = checkSource("schema.ts", src).filter((f) => f.section === 21).map((f) => f.line);
+  expect(lines).toEqual([2, 4, 6, 7]);
+});
