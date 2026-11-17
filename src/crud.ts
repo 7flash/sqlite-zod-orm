@@ -13,6 +13,53 @@ function qi(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
 }
 
+const activeHooks = new WeakMap<object, Set<string>>();
+
+/** Lifecycle hooks are synchronous. Reject promises and same-hook re-entry. */
+function invokeHookSync<T>(
+  ctx: DatabaseContext,
+  entityName: string,
+  hookName: string,
+  hook: () => T,
+): T {
+  let active = activeHooks.get(ctx);
+  if (!active) {
+    active = new Set();
+    activeHooks.set(ctx, active);
+  }
+  const key = `${entityName}:${hookName}`;
+  if (active.has(key))
+    throw new Error(`Recursive lifecycle hook ${entityName}.${hookName} is not supported`);
+
+  active.add(key);
+  try {
+    const result = hook();
+    if (
+      result !== null &&
+      (typeof result === "object" || typeof result === "function") &&
+      typeof (result as any).then === "function"
+    ) {
+      if (hookName.startsWith("after")) {
+        // The write is already done: an async after-hook is fire-and-forget,
+        // but its rejection must not go unhandled.
+        Promise.resolve(result).catch((error) => {
+          console.error(`[sqlite-zod-orm] ${entityName}.${hookName} hook failed:`, error);
+        });
+        return result;
+      }
+      // A before-hook decides the write (beforeDelete returning false cancels
+      // it); a Promise cannot be awaited by this synchronous API, so refuse it.
+      void Promise.resolve(result).catch(() => undefined);
+      throw new TypeError(
+        `Lifecycle hook ${entityName}.${hookName} must be synchronous`,
+      );
+    }
+    return result;
+  } finally {
+    active.delete(key);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Read helpers
 // ---------------------------------------------------------------------------
@@ -81,7 +128,9 @@ function executeInsert<T extends Record<string, any>>(
   // beforeInsert hook — can transform data
   const hooks = ctx.hooks[entityName];
   if (hooks?.beforeInsert) {
-    const result = hooks.beforeInsert(inputData);
+    const result = invokeHookSync(
+      ctx, entityName, "beforeInsert", () => hooks.beforeInsert!(inputData),
+    );
     if (result) inputData = result;
   }
 
@@ -112,7 +161,9 @@ function executeInsert<T extends Record<string, any>>(
   if (!newEntity) throw new Error("Failed to retrieve entity after insertion");
 
   // afterInsert hook
-  if (!deferAfterHook && hooks?.afterInsert) hooks.afterInsert(newEntity);
+  if (!deferAfterHook && hooks?.afterInsert)
+    invokeHookSync(ctx, entityName, "afterInsert", () =>
+      hooks.afterInsert!(newEntity));
 
   return newEntity;
 }
@@ -138,7 +189,9 @@ export function update<T extends Record<string, any>>(
   // beforeUpdate hook — can transform data
   const hooks = ctx.hooks[entityName];
   if (hooks?.beforeUpdate) {
-    const result = hooks.beforeUpdate(inputData, id);
+    const result = invokeHookSync(
+      ctx, entityName, "beforeUpdate", () => hooks.beforeUpdate!(inputData, id),
+    );
     if (result) inputData = result;
   }
 
@@ -164,11 +217,13 @@ export function update<T extends Record<string, any>>(
 
   // afterUpdate hook
   if (!deferAfterHook && hooks?.afterUpdate && updated)
-    hooks.afterUpdate(updated);
+    invokeHookSync(ctx, entityName, "afterUpdate", () =>
+      hooks.afterUpdate!(updated));
 
   return updated;
 }
 
+/** Bulk SQL update: deliberately bypasses per-row beforeUpdate/afterUpdate hooks. */
 export function updateWhere(
   ctx: DatabaseContext,
   entityName: string,
@@ -251,8 +306,12 @@ export function upsert<T extends Record<string, any>>(
 
   // After-hooks must describe committed changes, never rolled-back ones.
   const hooks = ctx.hooks[entityName];
-  if (result.created) hooks?.afterInsert?.(result.entity);
-  else hooks?.afterUpdate?.(result.entity);
+  if (result.created && hooks?.afterInsert)
+    invokeHookSync(ctx, entityName, "afterInsert", () =>
+      hooks.afterInsert!(result.entity));
+  else if (!result.created && hooks?.afterUpdate)
+    invokeHookSync(ctx, entityName, "afterUpdate", () =>
+      hooks.afterUpdate!(result.entity));
 
   return result.entity;
 }
@@ -279,17 +338,21 @@ export function deleteEntity(
   // beforeDelete hook — return false to cancel
   const hooks = ctx.hooks[entityName];
   if (hooks?.beforeDelete) {
-    const result = hooks.beforeDelete(id);
+    const result = invokeHookSync(
+      ctx, entityName, "beforeDelete", () => hooks.beforeDelete!(id),
+    );
     if (result === false) return;
   }
 
   ctx._stmt(`DELETE FROM ${qi(entityName)} WHERE id = ?`).run(id);
 
   // afterDelete hook
-  if (hooks?.afterDelete) hooks.afterDelete(id);
+  if (hooks?.afterDelete)
+    invokeHookSync(ctx, entityName, "afterDelete", () =>
+      hooks.afterDelete!(id));
 }
 
-/** Delete all rows matching the given conditions. Returns the number of rows affected. */
+/** Bulk SQL delete: deliberately bypasses per-row beforeDelete/afterDelete hooks. */
 export function deleteWhere(
   ctx: DatabaseContext,
   entityName: string,
@@ -350,7 +413,8 @@ export function insertMany<T extends Record<string, any>>(
 
       // beforeInsert hook
       if (hooks?.beforeInsert) {
-        const result = hooks.beforeInsert(inputData);
+        const result = invokeHookSync(ctx, entityName, "beforeInsert", () =>
+          hooks.beforeInsert!(inputData));
         if (result) inputData = result;
       }
 
@@ -383,7 +447,8 @@ export function insertMany<T extends Record<string, any>>(
 
   // afterInsert hooks
   if (hooks?.afterInsert) {
-    for (const entity of entities) hooks.afterInsert(entity);
+    for (const entity of entities)
+      invokeHookSync(ctx, entityName, "afterInsert", () => hooks.afterInsert!(entity));
   }
 
   return entities;
