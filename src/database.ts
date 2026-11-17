@@ -1079,7 +1079,19 @@ class _Database<Schemas extends SchemaMap> {
     options: TransactionOptions = {},
   ): T {
     return this._m("transaction", () =>
-      this.db.transaction(callback)[options.mode ?? "immediate"](),
+      this.db.transaction(() => {
+        const result = callback();
+        // SQLite commits when the callback returns, not when a Promise
+        // settles: awaited writes would run outside the transaction. Throwing
+        // here rolls the transaction back.
+        if (result && typeof (result as any).then === "function") {
+          void Promise.resolve(result).catch(() => undefined);
+          throw new TypeError(
+            "db.transaction() callback must be synchronous; do async work before or after the transaction",
+          );
+        }
+        return result;
+      })[options.mode ?? "immediate"](),
     );
   }
 
