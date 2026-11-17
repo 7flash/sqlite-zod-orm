@@ -203,7 +203,7 @@ export function update<T extends Record<string, any>>(
     if (result) inputData = result;
   }
 
-  const validatedData = asZodObject(schema).partial().parse(inputData);
+  const validatedData = parsePartial(schema, inputData);
   const transformed = transformForStorage(validatedData, schema);
   if (Object.keys(transformed).length === 0 && !ctx.timestamps)
     return getById(ctx, entityName, id);
@@ -239,7 +239,7 @@ export function updateWhere(
   conditions: Record<string, any>,
 ): number {
   const schema = ctx.schemas[entityName]!;
-  const validatedData = asZodObject(schema).partial().parse(data);
+  const validatedData = parsePartial(schema, data);
   const transformed = transformForStorage(validatedData, schema);
   if (Object.keys(transformed).length === 0) return 0;
 
@@ -588,4 +588,18 @@ export function upsertMany<T extends Record<string, any>>(
   });
 
   return txn.immediate();
+}
+
+/**
+ * Validate the fields of a partial update. Zod 4 fills in `.default()` values
+ * for fields left out even under `.partial()`, which would overwrite stored
+ * data, so only the fields the caller passed are kept.
+ */
+function parsePartial(schema: any, data: Record<string, any>): Record<string, any> {
+  const parsed = asZodObject(schema).partial().parse(data) as Record<string, any>;
+  const out: Record<string, any> = {};
+  for (const key of Object.keys(parsed)) {
+    if (Object.hasOwn(data, key)) out[key] = parsed[key];
+  }
+  return out;
 }
