@@ -499,6 +499,10 @@ With `softDeletes` on, `get(id)`, joins, `.with()` and relation accessors no lon
 
 `load()` and `seed()` now keep the `id` in each row, validate rows against the schema, and throw on an unknown table or column (they used to skip unknown tables silently and drop ids). Fixtures with a misspelt table name, or rows that do not match the schema, now fail instead of loading partially. Remove `id` from fixture rows if you relied on new ids being assigned.
 
+## 17. `restore()` follows the cascade
+
+`restore(id)` now also restores the children that were soft-deleted together with the row (same `deletedAt`), throws for an id that does not exist, and refuses to restore a row whose parent is still deleted. Restore the parent first, or restore through the parent.
+
 ## Upgrade checklist
 
 Before deploying version 4.0.0:
