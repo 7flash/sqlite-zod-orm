@@ -513,11 +513,14 @@ export class QueryBuilder<
   count(): number {
     // Reuse compileIQO to avoid duplicating WHERE logic
     const { sql: selectSql, params } = compileIQO(this.tableName, this.iqo);
-    // Replace "SELECT ... FROM" with "SELECT COUNT(*) as count FROM"
-    const countSql = selectSql.replace(
-      /^SELECT .+? FROM/,
-      "SELECT COUNT(*) as count FROM",
-    );
+    // With groupBy, COUNT(*) would be computed per group and the first group
+    // returned; count the result rows (the groups) instead, like all().length.
+    const countSql = this.iqo.groupBy.length > 0
+      ? `SELECT COUNT(*) as count FROM (${selectSql})`
+      : selectSql.replace(
+        /^SELECT .+? FROM/,
+        "SELECT COUNT(*) as count FROM",
+      );
     return this._cached("count", countSql, params, true, () => {
       const results = this.executor(countSql, params, true);
       return (results[0] as any)?.count ?? 0;
@@ -631,12 +634,23 @@ export class QueryBuilder<
 
   // ---------- Aggregate Methods ----------
 
+  /** Quoted column for an aggregate; refuses grouped queries. */
+  private _aggregateColumn(fn: string, field: string): string {
+    if (this.iqo.groupBy.length > 0)
+      throw new Error(
+        `${fn}() on a grouped query would return the first group's value; ` +
+          `use countGrouped() or select(...) with SQL aggregates per group`,
+      );
+    return `"${String(field).replaceAll('"', '""')}"`;
+  }
+
   /** Returns the SUM of a numeric column. */
   sum(field: keyof T & string): number {
     const { sql: selectSql, params } = compileIQO(this.tableName, this.iqo);
     const aggSql = selectSql.replace(
       /^SELECT .+? FROM/,
-      `SELECT COALESCE(SUM("${field}"), 0) as val FROM`,
+      // TOTAL() never overflows (SUM() throws on big INTEGERs) and is 0.0 when empty.
+      `SELECT TOTAL(${this._aggregateColumn("sum", field)}) as val FROM`,
     );
     return this._cached(`sum:${String(field)}`, aggSql, params, true, () => {
       const results = this.executor(aggSql, params, true);
@@ -649,7 +663,7 @@ export class QueryBuilder<
     const { sql: selectSql, params } = compileIQO(this.tableName, this.iqo);
     const aggSql = selectSql.replace(
       /^SELECT .+? FROM/,
-      `SELECT AVG("${field}") as val FROM`,
+      `SELECT AVG(${this._aggregateColumn("avg", field)}) as val FROM`,
     );
     return this._cached(`avg:${String(field)}`, aggSql, params, true, () => {
       const results = this.executor(aggSql, params, true);
@@ -662,7 +676,7 @@ export class QueryBuilder<
     const { sql: selectSql, params } = compileIQO(this.tableName, this.iqo);
     const aggSql = selectSql.replace(
       /^SELECT .+? FROM/,
-      `SELECT MIN("${field}") as val FROM`,
+      `SELECT MIN(${this._aggregateColumn("min", field)}) as val FROM`,
     );
     return this._cached(`min:${String(field)}`, aggSql, params, true, () => {
       const results = this.executor(aggSql, params, true);
@@ -675,7 +689,7 @@ export class QueryBuilder<
     const { sql: selectSql, params } = compileIQO(this.tableName, this.iqo);
     const aggSql = selectSql.replace(
       /^SELECT .+? FROM/,
-      `SELECT MAX("${field}") as val FROM`,
+      `SELECT MAX(${this._aggregateColumn("max", field)}) as val FROM`,
     );
     return this._cached(`max:${String(field)}`, aggSql, params, true, () => {
       const results = this.executor(aggSql, params, true);
