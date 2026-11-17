@@ -1142,59 +1142,108 @@ class _Database<Schemas extends SchemaMap> {
   // Data Import / Export
   // =========================================================================
 
-  /**
-   * Export all data as a JSON-serializable object.
-   * Each key is a table name, value is an array of raw row objects.
-   */
+  private _dumpKind(type: any): string {
+    for (let i = 0; i < 10; i++) {
+      const def = type?._def ?? type?._zod?.def;
+      const kind = String(def?.typeName ?? def?.type ?? "").replace(/^Zod/, "").toLowerCase();
+      if (!["optional", "nullable", "default", "catch", "readonly"].includes(kind)) return kind;
+      type = def?.innerType;
+    }
+    return "";
+  }
+
+  private _dumpIdent(s: string): string {
+    return `"${s.replaceAll('"', '""')}"`;
+  }
+
+  /** Export raw SQLite rows; large INTEGERs use a JSON-safe tagged value. */
   public dump(): Record<string, any[]> {
     return this._m("dump", () => {
       const result: Record<string, any[]> = {};
       for (const tableName of Object.keys(this.schemas)) {
-        result[tableName] = this.db.query(`SELECT * FROM "${tableName}"`).all();
+        const rows: any[] = (result[tableName] = []);
+        const stmt = (this.db.prepare(`SELECT * FROM ${this._dumpIdent(tableName)}`) as any).safeIntegers(true);
+        for (const row of stmt.iterate() as Iterable<Record<string, any>>) {
+          for (const [key, value] of Object.entries(row)) {
+            if (typeof value === "bigint") {
+              row[key] = value <= BigInt(Number.MAX_SAFE_INTEGER) &&
+                value >= BigInt(Number.MIN_SAFE_INTEGER)
+                ? Number(value) : { $sqliteBigInt: value.toString() };
+            }
+          }
+          rows.push(row);
+        }
       }
       return result;
     });
   }
 
-  /**
-   * Import data from a dump object. Truncates existing data first.
-   * Use `{ append: true }` to insert without truncating.
-   */
-  public load(
-    data: Record<string, any[]>,
-    options?: { append?: boolean },
-  ): void {
+  /** Replace supplied tables; append inserts without overwriting existing IDs. */
+  public load(data: Record<string, any[]>, options?: { append?: boolean }): void {
     this._m(`load(${Object.keys(data).join(",")})`, () => {
-      const txn = this.db.transaction(() => {
-        for (const [tableName, rows] of Object.entries(data)) {
-          if (!this.schemas[tableName]) continue;
-          if (!options?.append) {
-            this.db.run(`DELETE FROM "${tableName}"`);
-          }
-          for (const row of rows) {
-            const cols = Object.keys(row).filter((k) => k !== "id");
-            const placeholders = cols.map(() => "?").join(", ");
-            const values = cols.map((c) => {
-              const v = row[c];
-              if (
-                v !== null &&
-                v !== undefined &&
-                typeof v === "object" &&
-                !(v instanceof Buffer)
-              ) {
-                return JSON.stringify(v);
+      const fk = (this.db.query("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys;
+      if (fk) {
+        this.db.run("PRAGMA foreign_keys = OFF");
+        if ((this.db.query("PRAGMA foreign_keys").get() as any).foreign_keys)
+          throw new Error("load cannot run inside an existing transaction");
+      }
+      try {
+        this.db.transaction(() => {
+          for (const [tableName, rows] of Object.entries(data)) {
+            if (!Object.hasOwn(this.schemas, tableName)) throw new Error(`Unknown table: ${tableName}`);
+            if (!Array.isArray(rows)) throw new TypeError(`Expected rows for ${tableName}`);
+            const table = this._dumpIdent(tableName);
+            const allowed = new Set((this.db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name));
+            const fields = new Map(getStorableFields(this.schemas[tableName]!).map((f) =>
+              [f.name, this._dumpKind(f.type)]));
+            if (!options?.append) this.db.run(`DELETE FROM ${table}`);
+            const inserts = new Map<string, ReturnType<typeof this.db.prepare>>();
+            for (const row of rows) {
+              if (!row || typeof row !== "object" || Array.isArray(row))
+                throw new TypeError(`Invalid row for ${tableName}`);
+              const cols = Object.keys(row).filter((c) => row[c] !== undefined);
+              for (const c of cols) if (!allowed.has(c)) throw new Error(`Unknown column ${tableName}.${c}`);
+              const logical: Record<string, any> = {};
+              const values = cols.map((c) => {
+                const kind = fields.get(c);
+                let v = row[c];
+                if (v && typeof v === "object" && "$sqliteBigInt" in v &&
+                    !["object", "array", "record", "tuple"].includes(kind ?? ""))
+                  v = BigInt(v.$sqliteBigInt);
+                if (v !== null && kind === "bigint") {
+                  if (typeof v === "number" && !Number.isSafeInteger(v))
+                    throw new RangeError(`Unsafe integer: ${tableName}.${c}`);
+                  v = BigInt(v);
+                }
+                if (fields.has(c)) {
+                  if (v === null) logical[c] = null;
+                  else if (kind === "boolean") logical[c] = v === 1 || v === 1n ? true :
+                    v === 0 || v === 0n ? false : v;
+                  else if (kind === "date") logical[c] = v instanceof Date ? v : new Date(v);
+                  else if (["object", "array", "record", "tuple"].includes(kind ?? ""))
+                    logical[c] = typeof v === "string" ? JSON.parse(v) : v;
+                  else logical[c] = v;
+                }
+                return v instanceof Date ? v.toISOString() :
+                  v !== null && typeof v === "object" && !(v instanceof Uint8Array)
+                    ? JSON.stringify(v) : v;
+              });
+              this.schemas[tableName]!.parse(logical);
+              if (!cols.length) this.db.run(`INSERT INTO ${table} DEFAULT VALUES`);
+              else {
+                const sql = `INSERT INTO ${table} (${cols.map((c) => this._dumpIdent(c)).join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`;
+                let stmt: any = inserts.get(sql);
+                if (!stmt) inserts.set(sql, stmt = (this.db.prepare(sql) as any).safeIntegers(true));
+                stmt.run(...values);
               }
-              return v;
-            });
-            this.db
-              .query(
-                `INSERT INTO "${tableName}" (${cols.map((c) => `"${c}"`).join(", ")}) VALUES (${placeholders})`,
-              )
-              .run(...values);
+            }
           }
-        }
-      });
-      txn();
+          if (this.db.query("PRAGMA foreign_key_check").get())
+            throw new Error("load violates a foreign key");
+        })();
+      } finally {
+        if (fk) this.db.run("PRAGMA foreign_keys = ON");
+      }
     });
   }
 
