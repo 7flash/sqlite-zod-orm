@@ -507,6 +507,10 @@ With `softDeletes` on, `get(id)`, joins, `.with()` and relation accessors no lon
 
 `select().groupBy("x").count()` now returns the number of groups; it used to return the row count of the first group. `sum`, `avg`, `min` and `max` on a grouped query now throw (they returned the first group's value). Use `countGrouped()`, or `select()` with your own aggregate per group.
 
+## 19. bigint columns and nested dates
+
+`z.bigint()` columns now read back as `bigint` (they were strings), and `z.date()` fields inside JSON columns read back as `Date` (they were ISO strings). Code that called `BigInt(row.big)` or `new Date(row.meta.at)` keeps working; code that compared them as strings must change.
+
 ## Upgrade checklist
 
 Before deploying version 4.0.0:

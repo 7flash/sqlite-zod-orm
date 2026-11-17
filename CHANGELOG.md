@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Reads return schema types: `z.bigint()` columns are bigints (were strings), and dates nested in JSON columns are `Date` objects (were strings).
 - `count()` after `groupBy()` returns the number of groups (it returned the first group's count); `sum`/`avg`/`min`/`max` after `groupBy()` throw instead of returning the first group's value; `sum()` no longer overflows on large integers.
 - The prepared statement cache is bounded (500 per database); SQL with varying text no longer grows memory without limit.
 - `restore()` restores the cascade deleted with the row, refuses orphans, throws for a missing id, and runs new `beforeRestore`/`afterRestore` hooks.
