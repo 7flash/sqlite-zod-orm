@@ -74,6 +74,9 @@ type Listener = {
   callback: (row: any) => void | Promise<void>;
 };
 
+/** Most prepared statements kept per database (least recently used are dropped). */
+const STATEMENT_CACHE_SIZE = 500;
+
 class _Database<Schemas extends SchemaMap> {
   private db: SqliteDatabase;
   private _reactive: boolean;
@@ -111,12 +114,24 @@ class _Database<Schemas extends SchemaMap> {
   /** Get or create a cached prepared statement. */
   private _stmt(sql: string): ReturnType<SqliteDatabase["query"]> {
     let stmt = this._stmtCache.get(sql);
-    if (!stmt) {
-      stmt = this.db.query(sql);
-      this._stmtCache.set(sql, stmt);
+    if (stmt) {
+      // Move to the end: the Map's order is least to most recently used.
+      this._stmtCache.delete(sql);
+    } else {
+      // prepare(), not query(): query() also caches in Bun without a bound,
+      // so raw() with varying SQL text would grow memory forever.
+      stmt = this.db.prepare(sql);
+    }
+    this._stmtCache.set(sql, stmt);
+    if (this._stmtCache.size > STATEMENT_CACHE_SIZE) {
+      // Forget the least recently used statement. It is not finalized here,
+      // because a caller may still hold it; it is freed when collected.
+      const oldest = this._stmtCache.keys().next().value!;
+      this._stmtCache.delete(oldest);
     }
     return stmt;
   }
+
 
   /**
    * Conditional measurement helper — wraps with measure-fn only when debug is on.
