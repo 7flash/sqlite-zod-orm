@@ -124,6 +124,8 @@ export function transformForStorage(
       transformed[key] = value.toISOString();
     } else if (typeof value === "boolean") {
       transformed[key] = value ? 1 : 0;
+    } else if (typeof value === "bigint") {
+      transformed[key] = value.toString();
     } else if (
       value !== null &&
       value !== undefined &&
@@ -131,7 +133,8 @@ export function transformForStorage(
       !(value instanceof Buffer)
     ) {
       // Auto-serialize objects and arrays to JSON
-      transformed[key] = JSON.stringify(value);
+      transformed[key] = JSON.stringify(value, (_key, v) =>
+        typeof v === "bigint" ? v.toString() : v);
     } else {
       transformed[key] = value;
     }
@@ -164,10 +167,18 @@ export function transformFromStorage(
       typeof value === "number"
     ) {
       transformed[key] = value === 1;
+    } else if (fieldSchema instanceof z.ZodBigInt && typeof value === "string") {
+      transformed[key] = BigInt(value);
+    } else if (fieldSchema instanceof z.ZodLiteral && typeof value === "number" &&
+        [...fieldSchema.values].some(v => typeof v === "boolean" && Number(v) === value)) {
+      transformed[key] = value === 1;
+    } else if (fieldSchema instanceof z.ZodLiteral && typeof value === "string" &&
+        [...fieldSchema.values].some(v => typeof v === "bigint" && v.toString() === value)) {
+      transformed[key] = BigInt(value);
     } else if (isJsonSchema(fieldSchema) && typeof value === "string") {
       // Auto-parse JSON columns
       try {
-        transformed[key] = JSON.parse(value);
+        transformed[key] = revive(JSON.parse(value), fieldSchema);
       } catch {
         transformed[key] = value;
       }
@@ -176,6 +187,44 @@ export function transformFromStorage(
     }
   }
   return transformed;
+}
+
+/** Decode JSON using its schema; an ISO-looking z.string() stays a string. */
+function revive(value: any, schema: z.core.$ZodType | undefined): any {
+  while (
+    schema instanceof z.ZodOptional || schema instanceof z.ZodNullable ||
+    schema instanceof z.ZodDefault || schema instanceof z.ZodPrefault ||
+    schema instanceof z.ZodReadonly || schema instanceof z.ZodNonOptional
+  ) schema = schema.unwrap();
+  if (value == null || !schema) return value;
+  if (schema instanceof z.ZodDate && typeof value === "string") return new Date(value);
+  if (schema instanceof z.ZodBoolean && typeof value === "number") return value === 1;
+  if (schema instanceof z.ZodBigInt && typeof value === "string") return BigInt(value);
+  if (schema instanceof z.ZodLiteral) {
+    for (const v of schema.values) {
+      if (typeof v === "boolean" && typeof value === "number" && Number(v) === value)
+        return v;
+      if (typeof v === "bigint" && typeof value === "string" && v.toString() === value)
+        return v;
+    }
+  }
+  if (schema instanceof z.ZodArray && Array.isArray(value))
+    return value.map(v => revive(v, schema.element));
+  if (schema instanceof z.ZodTuple && Array.isArray(value))
+    return value.map((v, i) => revive(v, (schema as any).def.items[i]));
+  if (schema instanceof z.ZodObject && typeof value === "object" && !Array.isArray(value))
+    return Object.fromEntries(Object.entries(value).map(([k, v]) =>
+      [k, revive(v, schema.shape[k])]));
+  if (schema instanceof z.ZodRecord && typeof value === "object" && !Array.isArray(value))
+    return Object.fromEntries(Object.entries(value).map(([k, v]) =>
+      [k, revive(v, schema.valueType)]));
+  if (schema instanceof z.ZodUnion) {
+    for (const option of schema.options) {
+      const candidate = revive(value, option);
+      if ((option as z.ZodType).safeParse(candidate).success) return candidate;
+    }
+  }
+  return value;
 }
 
 /** Check if a Zod schema represents a JSON-serializable type */
