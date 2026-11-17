@@ -55,6 +55,7 @@ import {
   upsertMany,
   findOrCreate,
   deleteEntity,
+  restoreEntity,
   createDeleteBuilder,
   getById,
   getOne,
@@ -327,11 +328,9 @@ class _Database<Schemas extends SchemaMap> {
         restore: ((id: number) => {
           if (!this._softDeletes)
             throw new Error("restore() requires softDeletes: true");
-          this._m(`${entityName}.restore(${id})`, () => {
-            this._stmt(
-              `UPDATE "${entityName}" SET "deletedAt" = NULL WHERE id = ?`,
-            ).run(id);
-          });
+          this._m(`${entityName}.restore(${id})`, () =>
+            restoreEntity(this._ctx, entityName, id),
+          );
         }) as any,
         select: (...cols: string[]) =>
           createQueryBuilder(this._ctx, entityName, cols),

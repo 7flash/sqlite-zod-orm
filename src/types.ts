@@ -46,6 +46,9 @@ export type TableHooks = {
   afterUpdate?: (entity: Record<string, any>) => void;
   beforeDelete?: (id: number) => false | void;
   afterDelete?: (id: number) => void;
+  /** Return false to cancel a restore (softDeletes). */
+  beforeRestore?: (id: number) => false | void;
+  afterRestore?: (id: number) => void;
 };
 
 export type DatabaseOptions<

@@ -397,6 +397,76 @@ export function deleteEntity(
   }
 }
 
+/** Restore only descendants bearing the root's cascade-delete timestamp. */
+export function restoreEntity(ctx: DatabaseContext, entityName: string, id: number): void {
+  const rows: [string, number][] = [];
+  const seen = new Set<string>();
+  ctx.db.transaction(() => {
+    const root = ctx._stmt(`SELECT "deletedAt" FROM ${qi(entityName)} WHERE id = ?`)
+      .get(id) as { deletedAt: string | null } | null;
+    if (!root) throw new Error(`Cannot restore ${entityName}(${id}): row not found`);
+    if (root.deletedAt === null) return; // already live: no hooks
+    const stamp = root.deletedAt;
+    const visit = (table: string, rowId: number) => {
+      const key = `${table}:${rowId}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      rows.push([table, rowId]); // root first; cycles terminate
+      for (const child of ctx.cascade[table] ?? [])
+        for (const rel of ctx.relationships.filter(
+          (r) => r.type === "belongs-to" && r.from === child && r.to === table,
+        )) {
+          const matches = ctx._stmt(
+            `SELECT id FROM ${qi(child)} WHERE ${qi(rel.foreignKey)} = ? AND "deletedAt" = ?`,
+          ).all(rowId, stamp) as { id: number }[];
+          for (const match of matches) visit(child, match.id);
+        }
+    };
+    visit(entityName, id);
+
+    // Every restored row must have a live or simultaneously restored parent.
+    for (const [table, rowId] of rows)
+      for (const rel of ctx.relationships.filter(
+        (r) => r.type === "belongs-to" && r.from === table,
+      )) {
+        const parent = ctx._stmt(
+          `SELECT c.${qi(rel.foreignKey)} AS parentId, p.id AS found, ` +
+          `p."deletedAt" AS deletedAt FROM ${qi(table)} c ` +
+          `LEFT JOIN ${qi(rel.to)} p ON p.id = c.${qi(rel.foreignKey)} WHERE c.id = ?`,
+        ).get(rowId) as { parentId: number | null; found: number | null; deletedAt: string | null };
+        if (parent.parentId !== null &&
+            (parent.found === null || (parent.deletedAt !== null &&
+              !seen.has(`${rel.to}:${parent.parentId}`))))
+          throw new Error(`Cannot restore ${table}(${rowId}): parent ${rel.to}(${parent.parentId}) is deleted or missing`);
+      }
+
+    for (const [table, rowId] of rows) {
+      const hook = ctx.hooks[table]?.beforeRestore;
+      if (hook && invokeHookSync(ctx, table, "beforeRestore", () => hook(rowId)) === false) {
+        if (table === entityName && rowId === id) { rows.length = 0; return; }
+        throw new Error(`Cascade cancelled: ${table}.beforeRestore(${rowId}) returned false`);
+      }
+    }
+    for (const [table, rowId] of rows) {
+      try {
+        const result = ctx._stmt(
+          `UPDATE ${qi(table)} SET "deletedAt" = NULL WHERE id = ? AND "deletedAt" = ?`,
+        ).run(rowId, stamp);
+        // changes also counts rows written by the change-tracking trigger.
+        if (result.changes === 0) throw new Error(`Restore lost row ${table}(${rowId})`);
+      } catch (e) {
+        if (/UNIQUE constraint failed|SQLITE_CONSTRAINT_UNIQUE/i.test(String(e)))
+          throw new Error(`Cannot restore ${table}(${rowId}): unique constraint conflict`, { cause: e });
+        throw e;
+      }
+    }
+  }).immediate();
+  for (const [table, rowId] of rows.reverse()) {
+    const hook = ctx.hooks[table]?.afterRestore;
+    if (hook) invokeHookSync(ctx, table, "afterRestore", () => hook(rowId));
+  }
+}
+
 /** Bulk SQL delete: deliberately bypasses per-row beforeDelete/afterDelete hooks. */
 export function deleteWhere(
   ctx: DatabaseContext,
