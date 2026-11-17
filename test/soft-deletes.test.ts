@@ -83,3 +83,19 @@ test("entity cascade and builder bulk deletion retain tombstones", () => {
     expect(db.users.select().count()).toBe(0);
   } finally { db.close(); }
 });
+
+test("updating a soft-deleted row runs no beforeUpdate hook", () => {
+  const calls: number[] = [];
+  const db = new Database(":memory:", { notes: z.object({ text: z.string() }) }, {
+    softDeletes: true, reactive: false,
+    hooks: { notes: { beforeUpdate: (data: any, id: number) => { calls.push(id); return data; } } },
+  } as any);
+  const note = db.notes.insert({ text: "a" });
+  db.notes.delete(note.id);
+  expect(db.notes.update(note.id, { text: "b" })).toBeNull();
+  expect(calls).toEqual([]);
+  const live = db.notes.insert({ text: "c" });
+  db.notes.update(live.id, { text: "d" });
+  expect(calls).toEqual([live.id]);
+  db.close();
+});

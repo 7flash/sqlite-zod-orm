@@ -193,9 +193,10 @@ export function update<T extends Record<string, any>>(
   const schema = ctx.schemas[entityName]!;
   let inputData = { ...data } as Record<string, any>;
 
-  // beforeUpdate hook — can transform data
+  // beforeUpdate hook — can transform data. It runs only for a row the
+  // update can reach (a soft-deleted row is not updated, so no hook either).
   const hooks = ctx.hooks[entityName];
-  if (hooks?.beforeUpdate) {
+  if (hooks?.beforeUpdate && getById(ctx, entityName, id)) {
     const result = invokeHookSync(
       ctx, entityName, "beforeUpdate", () => hooks.beforeUpdate!(inputData, id),
     );
