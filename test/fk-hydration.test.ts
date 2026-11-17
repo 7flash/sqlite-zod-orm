@@ -32,7 +32,8 @@ describe("FK hydration preserves stored fields", () => {
       expect(projected.agentRefRelation()).toBeNull();
       const eager = db.coin_creation_grants.select().with("agentRefRelation").get()! as any;
       expect(eager.agentRef).toBe(first.id);
-      expect(eager.agentRefRelation().id).toBe(first.id);
+      // Eager loading attaches the row itself (README: posts[0].user), not the lazy accessor.
+      expect(eager.agentRefRelation.id).toBe(first.id);
       expect(db.coin_creation_grants.select("agentRef").get()!.agentRef).toBe(first.id);
       expect(db.coin_creation_grants.select("agentRef").raw().get()!.agentRef).toBe(first.id);
       assertScalar(db.coin_creation_grants.update(grant.id, { agentRef: second.id })!, second.id);

@@ -155,7 +155,7 @@ export function createQueryBuilder(
     parentTable: string,
     relation: string,
     parentIds: number[],
-  ): { key: string; groups: Map<number, any[]> } | null => {
+  ): { key: string; table: string; groups: Map<number, any>; many: boolean } | null => {
     const hasMany = ctx.relationships.find(
       (r) =>
         r.type === "one-to-many" &&
@@ -166,7 +166,7 @@ export function createQueryBuilder(
       const fk = hasMany.foreignKey;
       const placeholders = parentIds.map(() => "?").join(", ");
       const childRows = ctx
-        ._stmt(`SELECT * FROM "${hasMany.to.replace(/"/g, '""')}" WHERE "${fk.replace(/"/g, '""')}" IN (${placeholders})${ctx.softDeletes && !ctx.viewNames.has(hasMany.to) ? ' AND "deletedAt" IS NULL' : ''}`)
+        ._stmt(`SELECT * FROM "${hasMany.to.replace(/"/g, '""')}" WHERE "${fk.replace(/"/g, '""')}" IN (${placeholders})${ctx.softDeletes && !ctx.viewNames.has(hasMany.to) ? ' AND "deletedAt" IS NULL' : ''} ORDER BY "id"`)
         .all(...parentIds) as any[];
 
       const groups = new Map<number, any[]>();
@@ -180,7 +180,7 @@ export function createQueryBuilder(
         if (!groups.has(parentId)) groups.set(parentId, []);
         groups.get(parentId)!.push(entity);
       }
-      return { key: relation, groups };
+      return { key: relation, table: hasMany.to, groups, many: true };
     }
 
     const belongsTo = ctx.relationships.find(
@@ -190,7 +190,27 @@ export function createQueryBuilder(
         r.relationshipField === relation,
     );
     if (belongsTo) {
-      return null;
+      const fk = belongsTo.foreignKey;
+      // Only the requested parents are inspected; no unrelated parent can
+      // leak into a group when two FKs reference the same target table.
+      const placeholders = parentIds.map(() => "?").join(", ");
+      const parentRows = ctx._stmt(
+        `SELECT "id", "${fk.replace(/"/g, '""')}" FROM "${parentTable.replace(/"/g, '""')}" WHERE "id" IN (${placeholders})`,
+      ).all(...parentIds) as any[];
+      const targetIds = [...new Set(parentRows.map((r) => r[fk]).filter((id) => typeof id === "number"))];
+      const groups = new Map<number, any>();
+      if (targetIds.length > 0) {
+        const targetPlaceholders = targetIds.map(() => "?").join(", ");
+        const targetRows = ctx._stmt(
+          `SELECT * FROM "${belongsTo.to.replace(/"/g, '""')}" WHERE "id" IN (${targetPlaceholders})${ctx.softDeletes && !ctx.viewNames.has(belongsTo.to) ? ' AND "deletedAt" IS NULL' : ''}`,
+        ).all(...targetIds) as any[];
+        const schema = ctx.schemas[belongsTo.to]!;
+        const byId = new Map<number, any>();
+        for (const row of targetRows)
+          byId.set(row.id, ctx.attachMethods(belongsTo.to, transformFromStorage(row, schema)));
+        for (const row of parentRows) groups.set(row.id, byId.get(row[fk]) ?? null);
+      }
+      return { key: relation, table: belongsTo.to, groups, many: false };
     }
 
     return null;

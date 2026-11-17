@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.0.9 (2026-11-18)
+
+Found by a relations matrix (`test/relations-matrix.test.ts`: 180 users, 650 posts, 2,100 comments, tags through a link table, two FKs to one table, a self-reference, nullable, dangling and custom-named FKs, with softDeletes off and on; every accessor, `.with()` and join compared with hand-written SQL):
+
+- Fixed: `.with()` on a forward relation (the README's own `db.posts.select().with('user')`) loaded nothing; `posts[0].user` stayed the lazy accessor. It now attaches the related row, or `null` when the key is null, dangling or points at a soft-deleted row, in one batched query.
+- Added: nested paths such as `.with('posts.comments.author')`; overlapping paths share the loaded rows. Before, a dotted path was silently ignored.
+- Fixed: `orderBy('id')` (or any column both tables have) after `join()` threw "ambiguous column name". A bare `orderBy` field now means the main table's column, as its type already said.
+- Changed: arrays loaded by `.with()` are ordered by id (the order was unspecified).
+
 ## 4.0.8 (2026-11-18)
 
 Found by a differential query matrix (`test/query-matrix.test.ts`, 3,072 seeded queries over 8 column types and every where operator, each compared with a hand-written SQL statement on the same data). These bugs date back to 3.x:

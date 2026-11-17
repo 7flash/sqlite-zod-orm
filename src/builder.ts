@@ -85,7 +85,7 @@ export class QueryBuilder<
         parentTable: string,
         relation: string,
         parentIds: number[],
-      ) => { key: string; groups: Map<number, any[]> } | null)
+      ) => { key: string; table: string; groups: Map<number, any> ; many: boolean } | null)
     | null;
   private cacheTtlMs: number | null = null;
 
@@ -106,7 +106,7 @@ export class QueryBuilder<
           parentTable: string,
           relation: string,
           parentIds: number[],
-        ) => { key: string; groups: Map<number, any[]> } | null)
+        ) => { key: string; table: string; groups: Map<number, any> ; many: boolean } | null)
       | null,
   ) {
     this.tableName = tableName;
@@ -450,19 +450,38 @@ export class QueryBuilder<
       return results;
     }
 
-    const parentIds = results
-      .map((r: any) => r.id)
-      .filter((id: any) => typeof id === "number");
-    if (parentIds.length === 0) return results;
-
-    for (const relation of this.iqo.includes) {
-      const loaded = this.eagerLoader(this.tableName, relation, parentIds);
-      if (!loaded) continue;
-
-      for (const row of results as any[]) {
-        row[loaded.key] = loaded.groups.get(row.id) ?? [];
+    // A tree ensures that overlapping paths (posts and posts.comments) load
+    // the same child objects, regardless of the order of .with() arguments.
+    type IncludeNode = Map<string, IncludeNode>;
+    const tree: IncludeNode = new Map();
+    for (const path of this.iqo.includes) {
+      const parts = path.split(".");
+      if (parts.some((part) => !part))
+        throw new Error(`Invalid relation path '${path}'`);
+      let node = tree;
+      for (const part of parts) {
+        if (!node.has(part)) node.set(part, new Map());
+        node = node.get(part)!;
       }
     }
+    const visit = (table: string, rows: any[], node: IncludeNode): void => {
+      if (rows.length === 0) return;
+      const ids = [...new Set(rows.map((row) => row.id).filter((id) => typeof id === "number"))];
+      if (ids.length === 0) return;
+      for (const [relation, children] of node) {
+        const loaded = this.eagerLoader!(table, relation, ids);
+        if (!loaded) continue;
+        const next: any[] = [];
+        for (const row of rows) {
+          const value = loaded.groups.get(row.id) ?? (loaded.many ? [] : null);
+          row[loaded.key] = value;
+          if (Array.isArray(value)) next.push(...value);
+          else if (value != null) next.push(value);
+        }
+        visit(loaded.table, next, children);
+      }
+    };
+    visit(this.tableName, results as any[], tree);
 
     return results;
   }

@@ -286,7 +286,7 @@ export function compileIQO(
   // ORDER BY
   if (iqo.orderBy.length > 0) {
     const parts = iqo.orderBy.map(
-      (o) => `${quoteIdentifierPath(o.field)} ${sqlDirection(o.direction)}`,
+      (o) => `${quoteIdentifierPath(iqo.joins.length > 0 && !o.field.includes(".") ? `${tableName}.${o.field}` : o.field)} ${sqlDirection(o.direction)}`,
     );
     sql += ` ORDER BY ${parts.join(", ")}`;
   }
