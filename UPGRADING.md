@@ -511,6 +511,10 @@ With `softDeletes` on, `get(id)`, joins, `.with()` and relation accessors no lon
 
 `z.bigint()` columns now read back as `bigint` (they were strings), and `z.date()` fields inside JSON columns read back as `Date` (they were ISO strings). Code that called `BigInt(row.big)` or `new Date(row.meta.at)` keeps working; code that compared them as strings must change.
 
+## 20. Invalid `cascade` entries fail at startup
+
+A `cascade` entry whose table does not exist, or whose child has no `relations` entry pointing at the parent, now throws when the database opens. Before, such an entry was accepted and never cascaded. Fix the name, or add the missing relation.
+
 ## Upgrade checklist
 
 Before deploying version 4.0.0:
