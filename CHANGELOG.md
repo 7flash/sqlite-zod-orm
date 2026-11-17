@@ -23,6 +23,7 @@
 
 ### Changed
 
+- `db.transaction()` throws for an async callback (it used to commit at the first `await`, leaving later writes outside the transaction).
 - Lifecycle before-hooks must be synchronous: an async `beforeInsert`/`beforeUpdate`/`beforeDelete` now throws instead of being ignored (an async `beforeDelete` could never cancel a delete). Async after-hooks still run fire-and-forget; their rejections are logged. A hook that re-enters itself on the same table throws.
 - Schema changes, including adding nullable or defaulted columns, now use transactional table reconstruction rather than ALTER TABLE ADD COLUMN. Affected tables retain versioned table_vN snapshots for recovery.
 - Automatic migrations now refuse to change the type of a populated column or drop a populated column while adding another. These changes require explicit data migrations instead of silently copying incompatible data.

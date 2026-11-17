@@ -476,6 +476,10 @@ Also now rejected with an error: an `orderBy()` direction other than `asc`/`desc
 
 An `async` `beforeInsert`, `beforeUpdate` or `beforeDelete` now throws `Lifecycle hook <table>.<hook> must be synchronous`. It never worked as intended (the write did not wait, and an async `beforeDelete` could not cancel the delete). Make the hook synchronous, or move the async work to an after-hook, which may be async.
 
+## 13. Transaction callbacks must be synchronous
+
+`db.transaction(async () => ...)` now throws `db.transaction() callback must be synchronous`. It never did what it looked like: SQLite committed at the first `await`. Do async work (fetches, file reads) before the transaction, then write inside a synchronous callback.
+
 ## Upgrade checklist
 
 Before deploying version 4.0.0:
