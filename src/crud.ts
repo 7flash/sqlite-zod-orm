@@ -345,38 +345,56 @@ export function deleteEntity(
   entityName: string,
   id: number,
 ): void {
-  // beforeDelete hook — return false to cancel
-  const hooks = ctx.hooks[entityName];
-  if (hooks?.beforeDelete) {
-    const result = invokeHookSync(
-      ctx, entityName, "beforeDelete", () => hooks.beforeDelete!(id),
-    );
-    if (result === false) return;
-  }
+  const now = new Date().toISOString();
+  const deleted: [string, number][] = [];
+  const visited = new Set<string>();
 
-  const changed = ctx.db.transaction(() => {
-    if (!getById(ctx, entityName, id)) return false;
-    const now = new Date().toISOString();
-    for (const child of ctx.cascade[entityName] ?? []) {
-      const rel = ctx.relationships.find(
-        (r) => r.type === "belongs-to" && r.from === child && r.to === entityName,
+  // Parent first: its beforeDelete runs (and may veto) before any child's.
+  // Children are deleted before their parent; every row is visited once,
+  // so self-references and table cycles terminate.
+  const visit = (table: string, rowId: number, isRoot: boolean): boolean => {
+    const key = `${table}:${rowId}`;
+    if (visited.has(key)) return true;
+    visited.add(key);
+    if (!getById(ctx, table, rowId)) return false;
+    const hooks = ctx.hooks[table];
+    if (hooks?.beforeDelete) {
+      const verdict = invokeHookSync(ctx, table, "beforeDelete", () => hooks.beforeDelete!(rowId));
+      if (verdict === false) {
+        if (isRoot) return false; // the caller's own veto: nothing happens
+        throw new Error(`Cascade cancelled: ${table}.beforeDelete(${rowId}) returned false`);
+      }
+    }
+    for (const child of ctx.cascade[table] ?? []) {
+      const rels = ctx.relationships.filter(
+        (r) => r.type === "belongs-to" && r.from === child && r.to === table,
       );
-      if (!rel) continue;
-      if (ctx.softDeletes)
-        ctx._stmt(`UPDATE ${qi(child)} SET "deletedAt" = ? WHERE ${qi(rel.foreignKey)} = ? AND "deletedAt" IS NULL`).run(now, id);
-      else
-        ctx._stmt(`DELETE FROM ${qi(child)} WHERE ${qi(rel.foreignKey)} = ?`).run(id);
+      for (const rel of rels) {
+        const rows = ctx
+          ._stmt(
+            `SELECT id FROM ${qi(child)} WHERE ${qi(rel.foreignKey)} = ?${ctx.softDeletes ? ' AND "deletedAt" IS NULL' : ""}`,
+          )
+          .all(rowId) as { id: number }[];
+        for (const row of rows) visit(child, row.id, false);
+      }
     }
     const result = ctx.softDeletes
-      ? ctx._stmt(`UPDATE ${qi(entityName)} SET "deletedAt" = ? WHERE id = ? AND "deletedAt" IS NULL`).run(now, id)
-      : ctx._stmt(`DELETE FROM ${qi(entityName)} WHERE id = ?`).run(id);
-    return result.changes > 0;
+      ? ctx._stmt(`UPDATE ${qi(table)} SET "deletedAt" = ? WHERE id = ? AND "deletedAt" IS NULL`).run(now, rowId)
+      : ctx._stmt(`DELETE FROM ${qi(table)} WHERE id = ?`).run(rowId);
+    if (result.changes > 0) deleted.push([table, rowId]);
+    return true;
+  };
+
+  ctx.db.transaction(() => {
+    visit(entityName, id, true);
   }).immediate();
 
-  // afterDelete hook
-  if (changed && hooks?.afterDelete)
-    invokeHookSync(ctx, entityName, "afterDelete", () =>
-      hooks.afterDelete!(id));
+  // After-hooks describe committed deletes, children first.
+  for (const [table, rowId] of deleted) {
+    const hooks = ctx.hooks[table];
+    if (hooks?.afterDelete)
+      invokeHookSync(ctx, table, "afterDelete", () => hooks.afterDelete!(rowId));
+  }
 }
 
 /** Bulk SQL delete: deliberately bypasses per-row beforeDelete/afterDelete hooks. */

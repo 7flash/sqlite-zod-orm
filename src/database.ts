@@ -313,52 +313,11 @@ class _Database<Schemas extends SchemaMap> {
           ),
         delete: ((id?: any) => {
           if (typeof id === "number") {
-            return this._m(`${entityName}.delete(${id})`, () => {
-              // beforeDelete hook — return false to cancel
-              const hooks = this._ctx.hooks[entityName];
-              if (hooks?.beforeDelete) {
-                const result = hooks.beforeDelete(id);
-                if (result === false) return;
-              }
-
-              // Cascade delete children first
-              const cascadeTargets = this._ctx.cascade[entityName];
-              if (cascadeTargets) {
-                for (const childTable of cascadeTargets) {
-                  const rels = this._ctx.relationships.filter(
-                    (r) => r.type === "belongs-to" &&
-                      r.from === childTable && r.to === entityName,
-                  );
-                  if (rels.length) {
-                    // A child can reference this parent through more than one FK.
-                    const clause = rels.map((r) =>
-                      `"${this.escapeIdentifier(r.foreignKey)}" = ?`,
-                    ).join(" OR ");
-                    const params = rels.map(() => id);
-                    const child = this.escapeIdentifier(childTable);
-                    if (this._softDeletes) {
-                      const now = new Date().toISOString();
-                      this._stmt(
-                        `UPDATE "${child}" SET "deletedAt" = ? WHERE ${clause}`,
-                      ).run(now, ...params);
-                    } else {
-                      this._stmt(`DELETE FROM "${child}" WHERE ${clause}`)
-                        .run(...params);
-                    }
-                  }
-                }
-              }
-
-              if (this._softDeletes) {
-                const now = new Date().toISOString();
-                this._stmt(
-                  `UPDATE "${entityName}" SET "deletedAt" = ? WHERE id = ?`,
-                ).run(now, id);
-                if (hooks?.afterDelete) hooks.afterDelete(id);
-                return;
-              }
-              return deleteEntity(this._ctx, entityName, id);
-            });
+            // One implementation for db.table.delete(id) and entity.delete():
+            // recursive cascade, hooks once per row, one transaction.
+            return this._m(`${entityName}.delete(${id})`, () =>
+              deleteEntity(this._ctx, entityName, id),
+            );
           }
           return createDeleteBuilder(this._ctx, entityName);
         }) as any,
