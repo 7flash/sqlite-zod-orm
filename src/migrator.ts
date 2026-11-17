@@ -130,6 +130,8 @@ export class DatabaseMigrator {
 
     const backups: MigrationBackup[] = [];
     for (const row of rows) {
+      // A registered live table (users_v1 next to users) is never a backup.
+      if (knownTables.has(row.name)) continue;
       const parsed = parseBackupName(row.name, knownTables);
       if (!parsed) continue;
       if (!tableExists(this.db, parsed.table)) continue;
