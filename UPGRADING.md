@@ -2,6 +2,8 @@
 
 Version 4.0.0 introduces stricter schema migration validation, relationship resolution, and navigation accessor naming. Applications upgrading from 3.34 should review existing database schemas and relationship queries before deployment.
 
+Run `bunx sqlite-zod-orm upgrade-check .` in your app first: it points at the lines each section below affects.
+
 ## 1. Prepare for automatic schema rebuilds
 
 Schema synchronization can reconstruct existing tables rather than modifying them in place. Rebuilds involve existing data, indexes, triggers, and foreign-key relationships.

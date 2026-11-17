@@ -54,6 +54,7 @@ function printHelp(): void {
 
 Usage:
   sqlite-zod-orm migrate <db-module.ts> [options]
+  sqlite-zod-orm upgrade-check [dir] [--json]   Find code affected by the 4.0 changes
 
 Options:
   --list                         List available backup tables and exit
@@ -453,6 +454,14 @@ async function runMigrate(args: ParsedArgs): Promise<void> {
 }
 
 export async function runCli(argv = process.argv.slice(2)): Promise<void> {
+  if (argv[0] === "upgrade-check") {
+    const { upgradeCheck, formatFindings } = await import("./upgrade-check");
+    const dir = argv.find((arg, i) => i > 0 && !arg.startsWith("-")) ?? ".";
+    const findings = upgradeCheck(dir);
+    console.log(argv.includes("--json") ? JSON.stringify(findings, null, 2) : formatFindings(findings));
+    process.exitCode = findings.some((f) => f.severity === "error") ? 1 : 0;
+    return;
+  }
   let args: ParsedArgs;
   try {
     args = parseArgs(argv);

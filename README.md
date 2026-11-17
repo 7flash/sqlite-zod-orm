@@ -539,6 +539,16 @@ Raw WHERE fragments are also supported through `whereRaw()`.
 
 This is an escape hatch, not a requirement for using the ORM.
 
+## Upgrading to 4.0
+
+Run the upgrade check in your app before updating:
+
+```bash
+bunx sqlite-zod-orm upgrade-check .          # or --json for machine output
+```
+
+It lists every line that a 4.0 change affects, with the [UPGRADING.md](UPGRADING.md) section to read. `error` findings must change (4.0 rejects that code); `review` findings behave differently in 4.0. The exit code is 1 when something must change.
+
 ## Full Feature List
 
 - Zod-powered schema definition & runtime validation

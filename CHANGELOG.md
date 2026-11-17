@@ -2,6 +2,10 @@
 
 ## 4.0.0 (2026-11-17)
 
+### Added
+
+- `sqlite-zod-orm upgrade-check [dir] [--json]` lists the code in an app that the 4.0 changes affect, with the UPGRADING.md section for each.
+
 ### Security
 
 - Field names in `where()` (including inside `$or`) were written into SQL unquoted, so an app that let users choose the filter field was open to SQL injection. Field names are now quoted identifiers; values were always bound parameters.
