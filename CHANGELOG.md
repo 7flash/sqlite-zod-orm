@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.0.7 (2026-11-18)
+
+Found by a lifecycle test matrix (`test/lifecycle-matrix.test.ts`, 2,048 seeded sequences of up to 30 inserts, updates, upserts, deletes, soft deletes, restores, vetoing hooks and transactions over a 4-level tree, a self-reference and a many-to-many, checked after every step against a model of what each table should hold):
+
+- Fixed: `upsert` on a soft-deleted row revived it with a bare SQL update. A child whose parent was still deleted came back as a live orphan, the rows deleted together with it stayed deleted, and `beforeRestore`/`afterRestore` hooks did not run. Reviving through `upsert` is now a `restore()`: it refuses orphans, brings back the rows deleted with it, and runs the restore hooks (after-hooks only once the upsert has committed).
+- Fixed: two separate deletes in the same millisecond got the same `deletedAt`, so restoring one also restored the rows of the other. Soft-delete timestamps are now strictly increasing within a process.
+
 ## 4.0.6 (2026-11-18)
 
 Found by a schema-change test matrix (`test/migration-matrix.test.ts`, 422 cases: 30 kinds of schema change x 7 table shapes x empty/populated, each checking that data survives exactly or the open is refused with the file unchanged):

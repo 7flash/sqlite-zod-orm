@@ -503,7 +503,7 @@ db.users.select().where({ role: "admin" }).where((c, f) => op.gt(c.age, 30)).all
 // 3.x ignored { role: "admin" }; 4.0 returns admins over 30
 ```
 
-With `softDeletes` on, `get(id)`, joins, `.with()` and relation accessors no longer return deleted rows, and `upsert` restores a soft-deleted row with the same key instead of inserting a new one. Code that relied on seeing deleted rows through these paths must opt in explicitly.
+With `softDeletes` on, `get(id)`, joins, `.with()` and relation accessors no longer return deleted rows, and `upsert` restores a soft-deleted row with the same key instead of inserting a new one (since 4.0.7 exactly like `restore()`: orphans are refused, the rows deleted with it come back, restore hooks run). Code that relied on seeing deleted rows through these paths must opt in explicitly.
 
 ## 15. Cascade deletes go all the way down
 

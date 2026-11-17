@@ -13,6 +13,13 @@ function qi(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
 }
 
+// A restoration cohort must not accidentally share a millisecond with another delete.
+let lastDeleteMillisecond = 0;
+function deletionTimestamp(): string {
+  lastDeleteMillisecond = Math.max(Date.now(), lastDeleteMillisecond + 1);
+  return new Date(lastDeleteMillisecond).toISOString();
+}
+
 const activeHooks = new WeakMap<object, Set<string>>();
 
 /** Lifecycle hooks are synchronous. Reject promises and same-hook re-entry. */
@@ -280,6 +287,7 @@ export function upsert<T extends Record<string, any>>(
 ): AugmentedEntity<any> {
   // Reserve the write lock BEFORE reading. A deferred transaction permits
   // two connections to both observe a missing row and race to insert it.
+  let restored: [string, number][] = [];
   const txn = ctx.db.transaction(() => {
     const hasId = data?.id && typeof data.id === "number";
     const existing = hasId
@@ -290,8 +298,13 @@ export function upsert<T extends Record<string, any>>(
 
     if (existing) {
       // Reuse the unique key rather than inserting into a retained unique index.
-      if (ctx.softDeletes && existing.deletedAt != null)
-        ctx._stmt(`UPDATE ${qi(entityName)} SET "deletedAt" = NULL WHERE id = ?`).run(existing.id);
+      if (ctx.softDeletes && existing.deletedAt != null) {
+        // Upsert may revive a tombstone, but cannot bypass restore's orphan,
+        // cohort, or beforeRestore checks.
+        restored = restoreRows(ctx, entityName, existing.id);
+        if (!getById(ctx, entityName, existing.id))
+          throw new Error(`Cannot upsert ${entityName}(${existing.id}): restore was vetoed`);
+      }
       const updateData = { ...data };
       delete updateData.id;
       const entity = update(
@@ -314,6 +327,7 @@ export function upsert<T extends Record<string, any>>(
   });
 
   const result = txn.immediate();
+  runAfterRestore(ctx, restored);
 
   // After-hooks must describe committed changes, never rolled-back ones.
   const hooks = ctx.hooks[entityName];
@@ -346,7 +360,7 @@ export function deleteEntity(
   entityName: string,
   id: number,
 ): void {
-  const now = new Date().toISOString();
+  const now = deletionTimestamp();
   const deleted: [string, number][] = [];
   const visited = new Set<string>();
 
@@ -400,6 +414,19 @@ export function deleteEntity(
 
 /** Restore only descendants bearing the root's cascade-delete timestamp. */
 export function restoreEntity(ctx: DatabaseContext, entityName: string, id: number): void {
+  runAfterRestore(ctx, restoreRows(ctx, entityName, id));
+}
+
+/** afterRestore hooks, children first; call only once the restore is committed. */
+function runAfterRestore(ctx: DatabaseContext, rows: [string, number][]): void {
+  for (const [table, rowId] of rows) {
+    const hook = ctx.hooks[table]?.afterRestore;
+    if (hook) invokeHookSync(ctx, table, "afterRestore", () => hook(rowId));
+  }
+}
+
+/** Restore a row and its cohort; returns the restored rows (children first) without running after-hooks. */
+function restoreRows(ctx: DatabaseContext, entityName: string, id: number): [string, number][] {
   const rows: [string, number][] = [];
   const seen = new Set<string>();
   ctx.db.transaction(() => {
@@ -462,10 +489,7 @@ export function restoreEntity(ctx: DatabaseContext, entityName: string, id: numb
       }
     }
   }).immediate();
-  for (const [table, rowId] of rows.reverse()) {
-    const hook = ctx.hooks[table]?.afterRestore;
-    if (hook) invokeHookSync(ctx, table, "afterRestore", () => hook(rowId));
-  }
+  return rows.reverse();
 }
 
 /** Bulk SQL delete: deliberately bypasses per-row beforeDelete/afterDelete hooks. */
@@ -480,7 +504,7 @@ export function deleteWhere(
 
   if (ctx.softDeletes) {
     // Soft delete: set deletedAt instead of removing rows
-    const now = new Date().toISOString();
+    const now = deletionTimestamp();
     const sql = `UPDATE ${qi(entityName)} SET "deletedAt" = ? ${clause} AND "deletedAt" IS NULL`;
     const result = ctx._m(`SQL: ${sql.slice(0, 50)}`, () =>
       ctx._stmt(sql).run(now, ...values),
