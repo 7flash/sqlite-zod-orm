@@ -495,6 +495,10 @@ With `softDeletes` on, `get(id)`, joins, `.with()` and relation accessors no lon
 
 `cascade: { parents: ["children"] }` used to delete one level. Now every configured level is followed, each row's `beforeDelete`/`afterDelete` runs once, and a child's `beforeDelete` that returns `false` or throws cancels the whole delete (`Cascade cancelled: ...`). With `softDeletes`, the whole tree is soft-deleted. Check cascade configuration on deep trees before upgrading.
 
+## 16. `load()` and `seed()` are strict
+
+`load()` and `seed()` now keep the `id` in each row, validate rows against the schema, and throw on an unknown table or column (they used to skip unknown tables silently and drop ids). Fixtures with a misspelt table name, or rows that do not match the schema, now fail instead of loading partially. Remove `id` from fixture rows if you relied on new ids being assigned.
+
 ## Upgrade checklist
 
 Before deploying version 4.0.0:
