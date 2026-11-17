@@ -265,6 +265,18 @@ SQLite waits for locks before WAL or schema work; configure the wait with
 
 If the timeout expires, SQLite throws rather than continuing initialization.
 
+
+### Cleaning up snapshots
+
+Every table rebuild keeps the old table as `<table>_vN`, and none are deleted automatically. Remove old ones explicitly:
+
+```ts
+db.migrator().prune({ keep: 1, dryRun: true }); // what would be dropped
+db.migrator().prune({ keep: 1 });               // keep the newest snapshot per table
+```
+
+`prune()` only drops names `findBackups()` reports, never a registered live table, in one transaction.
+
 ## Persistence, Reactivity & Errors
 
 ### Automatic persistence

@@ -37,6 +37,7 @@
 
 ### Added
 
+- `db.migrator().prune({ keep, table, dryRun })` drops old `<table>_vN` rebuild snapshots, keeping the newest `keep` per table. Nothing is pruned automatically.
 - Table rebuilds now validate dependent triggers before committing. If a trigger references a removed or renamed column, initialization reports the broken trigger and rolls back the migration.
 - Rebuild validation now detects foreign-key violations and invalid dependent views before committing schema changes.
 - Multiple inverse relationships to the same parent now have distinct, consistently typed accessors for both lazy navigation and .with() eager loading.

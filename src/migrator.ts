@@ -151,6 +151,42 @@ export class DatabaseMigrator {
   }
 
   /** Suggest source columns for a destination column using exact and fuzzy name matching. */
+  /**
+   * Drop old `<table>_vN` snapshots, keeping the newest `keep` per table.
+   * Explicit only: nothing is pruned automatically. Only names that
+   * findBackups() reports are touched, never a registered live table.
+   * With `dryRun` nothing is dropped; the result lists what would be.
+   */
+  prune(
+    options: { keep?: number; table?: string; dryRun?: boolean } = {},
+  ): { dropped: MigrationBackup[]; kept: MigrationBackup[] } {
+    const keep = options.keep ?? 1;
+    if (!Number.isSafeInteger(keep) || keep < 0)
+      throw new TypeError("prune(): keep must be a non-negative integer");
+    const backups = this.findBackups().filter(
+      (b) => options.table === undefined || b.table === options.table,
+    );
+    const dropped: MigrationBackup[] = [];
+    const kept: MigrationBackup[] = [];
+    const seen = new Map<string, number>();
+    // findBackups() sorts each table's snapshots newest first.
+    for (const backup of backups) {
+      const count = seen.get(backup.table) ?? 0;
+      seen.set(backup.table, count + 1);
+      (count < keep ? kept : dropped).push(backup);
+    }
+    if (!options.dryRun && dropped.length > 0) {
+      const live = new Set(this.db.tables());
+      this.db.transaction(() => {
+        for (const backup of dropped) {
+          if (live.has(backup.backup)) continue; // never a live table
+          this.db.exec(`DROP TABLE IF EXISTS ${q(backup.backup)}`);
+        }
+      });
+    }
+    return { dropped, kept };
+  }
+
   suggestSources(from: string, toColumn: string, limit = 5): string[] {
     const sourceColumns = this.db.columns(from).map((c) => c.name);
     if (sourceColumns.includes(toColumn)) return [toColumn];
