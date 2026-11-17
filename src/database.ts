@@ -507,6 +507,35 @@ class _Database<Schemas extends SchemaMap> {
       `SELECT 1 FROM ${q(entityName)} WHERE ${q(name)} IS NOT NULL LIMIT 1`,
     ).get();
 
+    // Renamed columns must obey the populated type guard too: SQLite affinity
+    // can silently coerce values when an old column is copied into a new type.
+    for (const [from, to] of Object.entries(this._renames[entityName] ?? {})) {
+      if (!oldNames.has(from)) continue; // rename already applied
+      const original = columns.find((column) => column.name === from)!;
+      const targetType = expected.get(to);
+      if (targetType && original.type.trim().toUpperCase() !== targetType &&
+          populated(from)) {
+        throw new Error(
+          `Cannot automatically change type of populated column "${entityName}.${from}" ` +
+          `from ${original.type} to ${targetType} via rename to "${to}"; ` +
+          `use an explicit data-conversion migration.`,
+        );
+      }
+      if (oldNames.has(to) && populated(from)) {
+        throw new Error(
+          `Cannot automatically rename populated column "${entityName}.${from}" ` +
+          `to existing column "${to}"; use an explicit column-mapping migration.`,
+        );
+      }
+    }
+    // Losing deletedAt resurrects previously soft-deleted records.
+    if (!this._softDeletes && oldNames.has("deletedAt") && populated("deletedAt")) {
+      throw new Error(
+        `Cannot automatically drop populated column "${entityName}.deletedAt"; ` +
+        `disable softDeletes only after an explicit soft-delete migration.`,
+      );
+    }
+
     for (const column of columns) {
       const nextType = expected.get(column.name);
       if (nextType && column.type.trim().toUpperCase() !== nextType && populated(column.name)) {

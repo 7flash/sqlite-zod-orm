@@ -1,5 +1,13 @@
 # Changelog
 
+## 4.0.6 (2026-11-18)
+
+Found by a schema-change test matrix (`test/migration-matrix.test.ts`, 422 cases: 30 kinds of schema change x 7 table shapes x empty/populated, each checking that data survives exactly or the open is refused with the file unchanged):
+
+- Fixed: a declared rename that also changed the column's type (for example a text field renamed into a number field) was copied without the populated-column type check, so SQLite could silently convert the values. It is now refused like any other populated type change.
+- Fixed: a declared rename onto a column that already exists kept the existing column's values and dropped the renamed field's data. It is now refused; migrate such a mapping explicitly.
+- Fixed: turning `softDeletes` off dropped the populated `deletedAt` column, so deleted rows came back as live rows. Opening is now refused while any row is soft-deleted; restore or purge those rows first.
+
 ## 4.0.5 (2026-11-18)
 
 Found by a new round-trip test matrix (`test/roundtrip-matrix.test.ts`, 1,411 cells: every field type x every write path x optional/nullable/default):
