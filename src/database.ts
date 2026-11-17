@@ -1326,8 +1326,9 @@ class _Database<Schemas extends SchemaMap> {
                     v === 0 || v === 0n ? false : v;
                   else if (kind === "date") logical[c] = v instanceof Date ? v : new Date(v);
                   else if (["object", "array", "record", "tuple"].includes(kind ?? ""))
-                    logical[c] = typeof v === "string" ? JSON.parse(v) : v;
-                  else logical[c] = v;
+                    logical[c] = typeof v === "string"
+                      ? transformFromStorage({ [c]: v }, this.schemas[tableName]!)[c] : v;
+                  else logical[c] = transformFromStorage({ [c]: v }, this.schemas[tableName]!)[c];
                 }
                 return v instanceof Date ? v.toISOString() :
                   v !== null && typeof v === "object" && !(v instanceof Uint8Array)

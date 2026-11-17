@@ -1,5 +1,13 @@
 # Changelog
 
+## 4.0.5 (2026-11-18)
+
+Found by a new round-trip test matrix (`test/roundtrip-matrix.test.ts`, 1,411 cells: every field type x every write path x optional/nullable/default):
+
+- Fixed: number and boolean `z.literal()` fields read back as strings (`"2.5"`, `"1"`). Rows already stored that way read correctly too; no column type changes.
+- Fixed: a `z.custom<Uint8Array>()` field was saved as JSON (`{"0":1,"1":2}`) and lost its bytes. Bytes are now stored as a BLOB value; rows saved the old way are decoded back into bytes on read.
+- Fixed: `load(dump())` refused unions, discriminated unions, records, tuples, arrays of objects, objects with nested dates or bigints, bigint literals and Buffer fields. It now decodes every field the way reads do.
+
 ## 4.0.4 (2026-11-18)
 
 - UPGRADING.md section 21: the exported `z` is Zod 4 (3.x used Zod 3), and what that changes for app schemas.

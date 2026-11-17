@@ -122,8 +122,8 @@ export function transformForStorage(
   const transformed: Record<string, any> = {};
   const shape = schema ? asZodObject(schema).shape : undefined;
   for (const [key, value] of Object.entries(data)) {
-    if (shape && value !== null && value !== undefined && !(value instanceof Buffer) &&
-        isAnyValueSchema(unwrapField(shape[key]))) {
+    if (shape && value !== null && value !== undefined &&
+        !(value instanceof Uint8Array) && isAnyValueSchema(unwrapField(shape[key]))) {
       // z.any()/z.unknown(): store every value as JSON so it reads back with its type.
       transformed[key] = JSON.stringify(value, (_key, v) =>
         typeof v === "bigint" ? v.toString() : v);
@@ -137,7 +137,7 @@ export function transformForStorage(
       value !== null &&
       value !== undefined &&
       typeof value === "object" &&
-      !(value instanceof Buffer)
+      !(value instanceof Uint8Array)
     ) {
       // Auto-serialize objects and arrays to JSON
       transformed[key] = JSON.stringify(value, (_key, v) =>
@@ -164,6 +164,29 @@ export function transformFromStorage(
       } catch {
         transformed[key] = value;
       }
+    } else if (fieldSchema instanceof z.ZodCustom && typeof value === "string" &&
+        value.startsWith("{") && fieldSchema.safeParse(new Uint8Array(0)).success &&
+        !fieldSchema.safeParse(value).success) {
+      // 4.0.4 and earlier stored a Uint8Array as JSON ({"0":1,"1":2}); read it back as bytes.
+      try {
+        const obj = JSON.parse(value);
+        const keys = Object.keys(obj);
+        transformed[key] = keys.every((k, i) => k === String(i) && Number.isInteger(obj[k]) && obj[k] >= 0 && obj[k] <= 255)
+          ? new Uint8Array(keys.map((k) => obj[k])) : value;
+      } catch {
+        transformed[key] = value;
+      }
+    } else if (fieldSchema instanceof z.ZodCustom &&
+        value instanceof Uint8Array &&
+        fieldSchema.safeParse(Buffer.alloc(0)).success &&
+        !fieldSchema.safeParse(new Uint8Array(0)).success) {
+      // Reconstitute Buffer only for schemas requiring a Buffer instance.
+      transformed[key] = Buffer.from(value);
+    } else if (fieldSchema instanceof z.ZodCustom &&
+        value instanceof Uint8Array && Buffer.isBuffer(value) &&
+        !fieldSchema.safeParse(value).success &&
+        fieldSchema.safeParse(new Uint8Array(0)).success) {
+      transformed[key] = new Uint8Array(value);
     } else if (fieldSchema instanceof z.ZodDate && typeof value === "string") {
       transformed[key] = new Date(value);
     } else if (
@@ -173,12 +196,10 @@ export function transformFromStorage(
       transformed[key] = value === 1;
     } else if (fieldSchema instanceof z.ZodBigInt && typeof value === "string") {
       transformed[key] = BigInt(value);
-    } else if (fieldSchema instanceof z.ZodLiteral && typeof value === "number" &&
-        [...fieldSchema.values].some(v => typeof v === "boolean" && Number(v) === value)) {
-      transformed[key] = value === 1;
-    } else if (fieldSchema instanceof z.ZodLiteral && typeof value === "string" &&
-        [...fieldSchema.values].some(v => typeof v === "bigint" && v.toString() === value)) {
-      transformed[key] = BigInt(value);
+    } else if (fieldSchema instanceof z.ZodLiteral) {
+      // Also decode older (4.0.4) TEXT-affinity literal columns without
+      // requiring any schema migration or rewriting their stored values.
+      transformed[key] = revive(value, fieldSchema);
     } else if (isJsonSchema(fieldSchema) && typeof value === "string") {
       // Auto-parse JSON columns
       try {
@@ -205,11 +226,15 @@ function revive(value: any, schema: z.core.$ZodType | undefined): any {
   if (schema instanceof z.ZodBoolean && typeof value === "number") return value === 1;
   if (schema instanceof z.ZodBigInt && typeof value === "string") return BigInt(value);
   if (schema instanceof z.ZodLiteral) {
+    // Prefer exact matches for mixed literal sets (e.g. "1" and 1).
+    if (schema.values.has(value)) return value;
     for (const v of schema.values) {
-      if (typeof v === "boolean" && typeof value === "number" && Number(v) === value)
-        return v;
-      if (typeof v === "bigint" && typeof value === "string" && v.toString() === value)
-        return v;
+      if (typeof v === "boolean" &&
+          (value === Number(v) || value === String(Number(v)))) return v;
+      if (typeof v === "number" && typeof value === "string" &&
+          Number.isFinite(v) && String(v) === value) return v;
+      if (typeof v === "bigint" && typeof value === "string" &&
+          v.toString() === value) return v;
     }
   }
   if (schema instanceof z.ZodArray && Array.isArray(value))
