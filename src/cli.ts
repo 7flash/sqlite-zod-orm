@@ -10,6 +10,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { isatty } from "node:tty";
 import {
   createMigrator,
   type MigrationBackup,
@@ -61,7 +62,7 @@ Options:
   --table <table>                Pick newest backup for this current table
   --conflicts <abort|ignore|replace>
                                  Conflict strategy. Default: abort
-  --dry-run                      Print migration SQL without applying
+  --dry-run                      Preview without writing or applying
   --yes                          Apply without final confirmation
   --save <file.json>             Save the migration plan JSON
   --apply <file.json>            Apply a saved migration plan JSON
@@ -86,23 +87,37 @@ function parseArgs(argv: string[]): ParsedArgs {
   };
 
   const rest = argv.slice(1);
+  const takeValue = (flag: string): string => {
+    const value = rest.shift();
+    if (!value || value.startsWith("-"))
+      throw new Error(`Missing value for ${flag}`);
+    return value;
+  };
+  const seen = new Set<string>();
+  const once = (flag: string) => {
+    if (seen.has(flag)) throw new Error(`Duplicate option: ${flag}`);
+    seen.add(flag);
+  };
   while (rest.length > 0) {
     const arg = rest.shift()!;
     if (arg === "-h" || arg === "--help") parsed.help = true;
     else if (arg === "--dry-run") parsed.dryRun = true;
     else if (arg === "--yes" || arg === "-y") parsed.yes = true;
     else if (arg === "--list") parsed.list = true;
-    else if (arg === "--from") parsed.from = rest.shift();
-    else if (arg === "--to") parsed.to = rest.shift();
-    else if (arg === "--table") parsed.table = rest.shift();
-    else if (arg === "--save") parsed.save = rest.shift();
-    else if (arg === "--apply") parsed.apply = rest.shift();
+    else if (arg === "--from") { once(arg); parsed.from = takeValue(arg); }
+    else if (arg === "--to") { once(arg); parsed.to = takeValue(arg); }
+    else if (arg === "--table") { once(arg); parsed.table = takeValue(arg); }
+    else if (arg === "--save") { once(arg); parsed.save = takeValue(arg); }
+    else if (arg === "--apply") { once(arg); parsed.apply = takeValue(arg); }
     else if (arg === "--conflicts") {
-      const value = rest.shift();
+      once(arg);
+      const value = takeValue(arg);
       if (value !== "abort" && value !== "ignore" && value !== "replace") {
         throw new Error(`Invalid --conflicts value: ${value}`);
       }
       parsed.conflicts = value;
+    } else if (arg.startsWith("-")) {
+      throw new Error(`Unknown option: ${arg}`);
     } else if (!parsed.modulePath) {
       parsed.modulePath = arg;
     } else {
@@ -110,6 +125,12 @@ function parseArgs(argv: string[]): ParsedArgs {
     }
   }
 
+  if (parsed.from && !parsed.to || parsed.to && !parsed.from)
+    throw new Error("--from and --to must be supplied together");
+  if (parsed.apply && (parsed.from || parsed.to || parsed.table || parsed.save))
+    throw new Error("--apply cannot be combined with selection or --save");
+  if (parsed.list && (parsed.apply || parsed.save || parsed.from || parsed.to || parsed.table))
+    throw new Error("--list cannot be combined with migration options");
   return parsed;
 }
 
@@ -337,6 +358,28 @@ function printPlan(plan: MigrationPlan): void {
   }
 }
 
+// A local developer tool: show the SQL that would run against your own schema.
+function printSqlPreview(migrator: { explain(plan: MigrationPlan): string }, plan: MigrationPlan): void {
+  console.log(migrator.explain(plan));
+}
+
+async function confirmApply(
+  args: ParsedArgs,
+  rl?: ReturnType<typeof createInterface>,
+): Promise<boolean> {
+  if (args.yes) return true;
+  if (!isatty(input.fd) || !isatty(output.fd))
+    throw new Error("Refusing noninteractive migration without --yes");
+  const owned = rl ?? createInterface({ input, output });
+  try {
+    return /^(y|yes)$/i.test(
+      (await owned.question("\nApply migration? [y/N] ")).trim(),
+    );
+  } finally {
+    if (!rl) owned.close();
+  }
+}
+
 async function runMigrate(args: ParsedArgs): Promise<void> {
   if (!args.modulePath) throw new Error("Missing <db-module.ts>.");
 
@@ -353,8 +396,13 @@ async function runMigrate(args: ParsedArgs): Promise<void> {
     const plan = JSON.parse(
       readFileSync(resolve(args.apply), "utf8"),
     ) as MigrationPlan;
-    console.log(migrator.explain(plan));
+    printPlan(plan);
+    printSqlPreview(migrator, plan);
     if (args.dryRun) return;
+    if (!(await confirmApply(args))) {
+      console.log("Migration cancelled.");
+      return;
+    }
     const result = migrator.apply(plan);
     console.log(`\nMigrated ${plan.from} -> ${plan.to}`);
     console.log(`Rows read:     ${result.fromRows}`);
@@ -376,18 +424,16 @@ async function runMigrate(args: ParsedArgs): Promise<void> {
 
     printPlan(plan);
     console.log("\nSQL preview:\n");
-    console.log(migrator.explain(plan));
+    printSqlPreview(migrator, plan);
 
-    if (args.save) {
+    if (args.save && !args.dryRun) {
       writeFileSync(resolve(args.save), JSON.stringify(plan, null, 2) + "\n");
       console.log(`\nSaved plan: ${args.save}`);
     }
 
     if (args.dryRun) return;
 
-    const confirmed =
-      args.yes ||
-      /^(y|yes)$/i.test(await rl.question("\nApply migration? [y/N] "));
+    const confirmed = await confirmApply(args, rl);
     if (!confirmed) {
       console.log("Migration cancelled.");
       return;
@@ -405,7 +451,13 @@ async function runMigrate(args: ParsedArgs): Promise<void> {
 }
 
 export async function runCli(argv = process.argv.slice(2)): Promise<void> {
-  const args = parseArgs(argv);
+  let args: ParsedArgs;
+  try {
+    args = parseArgs(argv);
+  } catch (error) {
+    process.exitCode = 1;
+    throw error;
+  }
   if (args.help || !args.command) {
     printHelp();
     return;
@@ -415,7 +467,12 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
     throw new Error(`Unknown command: ${args.command}`);
   }
 
-  await runMigrate(args);
+  try {
+    await runMigrate(args);
+  } catch (error) {
+    process.exitCode = 1;
+    throw error;
+  }
 }
 
 if (import.meta.main) {
