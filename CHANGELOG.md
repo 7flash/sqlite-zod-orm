@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Soft deletes: `get(id)`, joins, `.with()` and relation accessors no longer return deleted rows, and `upsert` restores a soft-deleted row instead of inserting a duplicate.
 - Type declarations use explicit `.js` import paths, so projects on `moduleResolution: node16`/`nodenext` get the package's types (TS2834 before).
 - Change listeners: an async listener that rejects no longer causes an unhandled rejection, and unsubscribing a listener from inside another listener takes effect for the change being dispatched.
 - `upsert(conditions, data)` takes the write lock before its lookup, so two connections upserting the same key no longer race into a UNIQUE error; its after-hooks run only after commit.
@@ -24,6 +25,7 @@
 
 ### Changed
 
+- A callback `where()` and an object `where()` on the same query are both applied; before, the object filter was silently ignored.
 - Migration CLI: unknown options fail, `--apply` asks for confirmation (or needs `--yes` without a terminal), and `--dry-run` changes nothing.
 - `db.transaction()` throws for an async callback (it used to commit at the first `await`, leaving later writes outside the transaction).
 - Lifecycle before-hooks must be synchronous: an async `beforeInsert`/`beforeUpdate`/`beforeDelete` now throws instead of being ignored (an async `beforeDelete` could never cancel a delete). Async after-hooks still run fire-and-forget; their rejections are logged. A hook that re-enters itself on the same table throws.
