@@ -13,7 +13,7 @@
     }
   },
   "scripts": {
-    "build": "bun build ./src/index.ts --outdir ./dist --target bun --format esm && tsc -p tsconfig.build.json",
+    "build": "bun build ./src/index.ts --outdir ./dist --target bun --format esm && tsc -p tsconfig.build.json && bun scripts/fix-dts-extensions.ts",
     "clean": "rm -rf dist",
     "test": "bun test",
     "bench": "bun bench/triggers-vs-naive.ts && bun bench/poll-strategy.ts && bun bench/indexes.ts",

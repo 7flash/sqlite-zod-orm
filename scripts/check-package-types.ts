@@ -68,6 +68,12 @@ db.close();
 // TypeScript 7 exports package.json but not the private bin/tsc subpath.
 const compiler = join(dirname(fileURLToPath(import.meta.resolve("typescript/package.json"))), "bin", "tsc");
 run([process.execPath, compiler, "-p", join(fixture, "tsconfig.json"), "--pretty", "false"]);
+// Also node16 resolution: declarations must use explicit .js specifiers.
+const strictConfig = JSON.parse(readFileSync(join(fixture, "tsconfig.json"), "utf8"));
+strictConfig.compilerOptions.module = "Node16";
+strictConfig.compilerOptions.moduleResolution = "Node16";
+writeFileSync(join(fixture, "tsconfig.node16.json"), JSON.stringify(strictConfig));
+run([process.execPath, compiler, "-p", join(fixture, "tsconfig.node16.json"), "--pretty", "false"]);
 run([process.execPath, "consumer.ts"]);
 const declarations = readFileSync(join(fixture, "node_modules/sqlite-zod-orm/dist/database.d.ts"), "utf8");
 if (declarations.includes('from "measure-fn"')) throw new Error("Instrumentation leaked into public declarations");
