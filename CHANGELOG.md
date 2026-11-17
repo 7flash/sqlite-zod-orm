@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- The prepared statement cache is bounded (500 per database); SQL with varying text no longer grows memory without limit.
 - `restore()` restores the cascade deleted with the row, refuses orphans, throws for a missing id, and runs new `beforeRestore`/`afterRestore` hooks.
 - Indexes on removed columns, and indexes no longer declared in `indexes`/`unique` for a listed table, are dropped at startup; names with double quotes are escaped in index and table SQL.
 - `load()` keeps row ids (references survive a dump and reload), validates rows, quotes column names, rejects unknown tables and columns, and rolls back on a foreign key violation.
