@@ -204,6 +204,9 @@ class _Database<Schemas extends SchemaMap> {
       this.db.run("PRAGMA foreign_keys = OFF");
       this.db
         .transaction(() => {
+          this._m("Reconcile indexes", () =>
+            this.reconcileIndexes(options.indexes, options.unique),
+          );
           this._m("Sync tables", () => this.syncTablesToSchemas());
           if (options.indexes)
             this._m("Create indexes", () =>
@@ -403,9 +406,10 @@ class _Database<Schemas extends SchemaMap> {
   }
 
   private createTableSql(entityName: string, schema: z.ZodType<any>): string {
+    const q = (name: string) => `"${this.escapeIdentifier(name)}"`;
     const storableFields = getStorableFields(schema);
     const columnDefs = storableFields.map(
-      (f) => `"${f.name}" ${zodTypeToSqlType(f.type)}`,
+      (f) => `${q(f.name)} ${zodTypeToSqlType(f.type)}`,
     );
 
     // Add timestamp columns
@@ -425,7 +429,7 @@ class _Database<Schemas extends SchemaMap> {
     );
     for (const rel of belongsToRels) {
       constraints.push(
-        `FOREIGN KEY ("${rel.foreignKey}") REFERENCES "${rel.to}"(id) ON DELETE SET NULL`,
+        `FOREIGN KEY (${q(rel.foreignKey)}) REFERENCES ${q(rel.to)}(id) ON DELETE SET NULL`,
       );
     }
 
@@ -434,7 +438,7 @@ class _Database<Schemas extends SchemaMap> {
       ...columnDefs,
       ...constraints,
     ].join(", ");
-    return `CREATE TABLE "${entityName}" (${body})`;
+    return `CREATE TABLE ${q(entityName)} (${body})`;
   }
 
   /** Refuse implicit migrations that would lose values or SQLite semantics. */
@@ -835,27 +839,71 @@ class _Database<Schemas extends SchemaMap> {
     this._changeWatermark = row?.maxId ?? 0;
   }
 
-  private createIndexes(indexes: Record<string, (string | string[])[]>): void {
-    for (const [tableName, indexDefs] of Object.entries(indexes)) {
-      for (const def of indexDefs) {
+  private indexSql(table: string, cols: string[], unique: boolean): string {
+    const q = (name: string) => `"${this.escapeIdentifier(name)}"`;
+    const name = `${unique ? "uq" : "idx"}_${table}_${cols.join("_")}`;
+    return `CREATE ${unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS ${q(name)} ON ${q(table)} (${cols.map(q).join(", ")})`;
+  }
+
+  /**
+   * Drop indexes this library created (named idx_<table>_<cols> or
+   * uq_<table>_<cols>) that no longer fit: any whose columns left the schema,
+   * and, for tables listed in `indexes`/`unique`, any no longer declared.
+   * Runs before table rebuilds so a stale index is not restored.
+   * Indexes with other names are never touched.
+   */
+  private reconcileIndexes(
+    indexes: Record<string, (string | string[])[]> | undefined,
+    unique: Record<string, string[][]> | undefined,
+  ): void {
+    const q = (name: string) => `"${this.escapeIdentifier(name)}"`;
+    const declared = new Set<string>();
+    for (const [table, defs] of Object.entries(indexes ?? {}))
+      for (const def of defs) {
         const cols = Array.isArray(def) ? def : [def];
-        const idxName = `idx_${tableName}_${cols.join("_")}`;
-        this.db.run(
-          `CREATE INDEX IF NOT EXISTS "${idxName}" ON "${tableName}" (${cols.map((c) => `"${c}"`).join(", ")})`,
-        );
+        declared.add(`idx_${table}_${cols.join("_")}`);
+      }
+    for (const [table, groups] of Object.entries(unique ?? {}))
+      for (const cols of groups) declared.add(`uq_${table}_${cols.join("_")}`);
+    const managedTables = new Set([...Object.keys(indexes ?? {}), ...Object.keys(unique ?? {})]);
+
+    for (const [table, schema] of Object.entries(this.schemas)) {
+      const exists = this.db
+        .query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get(table);
+      if (!exists) continue;
+      const allowed = new Set([
+        "id", "createdAt", "updatedAt", "deletedAt",
+        ...getStorableFields(schema).map((field) => field.name),
+      ]);
+      const list = this.db.query(`PRAGMA index_list(${q(table)})`).all() as {
+        name: string; unique: number; origin: string;
+      }[];
+      for (const index of list) {
+        if (index.origin !== "c") continue;
+        const cols = (this.db.query(`PRAGMA index_info(${q(index.name)})`).all() as {
+          name: string | null;
+        }[]).map((c) => c.name);
+        if (cols.some((c) => c === null)) continue; // expression index: not ours
+        const prefix = index.unique ? "uq" : "idx";
+        if (index.name !== `${prefix}_${table}_${cols.join("_")}`) continue;
+        const stale =
+          cols.some((c) => !allowed.has(c as string)) ||
+          (managedTables.has(table) && !declared.has(index.name));
+        if (stale) this.db.run(`DROP INDEX ${q(index.name)}`);
       }
     }
   }
 
+  private createIndexes(indexes: Record<string, (string | string[])[]>): void {
+    for (const [table, defs] of Object.entries(indexes))
+      for (const def of defs)
+        this.db.run(this.indexSql(table, Array.isArray(def) ? def : [def], false));
+  }
+
   private createUniqueConstraints(unique: Record<string, string[][]>): void {
-    for (const [tableName, groups] of Object.entries(unique)) {
-      for (const cols of groups) {
-        const idxName = `uq_${tableName}_${cols.join("_")}`;
-        this.db.run(
-          `CREATE UNIQUE INDEX IF NOT EXISTS "${idxName}" ON "${tableName}" (${cols.map((c) => `"${c}"`).join(", ")})`,
-        );
-      }
-    }
+    for (const [table, groups] of Object.entries(unique))
+      for (const cols of groups) this.db.run(this.indexSql(table, cols, true));
   }
 
   private createOrUpdateViews(views: ViewDefinitions): void {
