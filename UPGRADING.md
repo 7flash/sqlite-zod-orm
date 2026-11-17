@@ -491,6 +491,10 @@ db.users.select().where({ role: "admin" }).where((c, f) => op.gt(c.age, 30)).all
 
 With `softDeletes` on, `get(id)`, joins, `.with()` and relation accessors no longer return deleted rows, and `upsert` restores a soft-deleted row with the same key instead of inserting a new one. Code that relied on seeing deleted rows through these paths must opt in explicitly.
 
+## 15. Cascade deletes go all the way down
+
+`cascade: { parents: ["children"] }` used to delete one level. Now every configured level is followed, each row's `beforeDelete`/`afterDelete` runs once, and a child's `beforeDelete` that returns `false` or throws cancels the whole delete (`Cascade cancelled: ...`). With `softDeletes`, the whole tree is soft-deleted. Check cascade configuration on deep trees before upgrading.
+
 ## Upgrade checklist
 
 Before deploying version 4.0.0:
