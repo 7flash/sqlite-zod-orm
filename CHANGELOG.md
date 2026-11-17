@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- `paginate()` no longer changes the query builder (later calls used the previous page's LIMIT), counts grouped and distinct queries correctly, orders by `id` when no order is given, and validates `page`/`perPage`.
 - Cascade deletes go through every level, handle self-references and cycles, run each row's hooks once (`beforeDelete` was called twice through `db.table.delete(id)`), soft-delete the whole tree, and roll back entirely if a child's `beforeDelete` vetoes or throws.
 - Soft deletes: `get(id)`, joins, `.with()` and relation accessors no longer return deleted rows, and `upsert` restores a soft-deleted row instead of inserting a duplicate.
 - Type declarations use explicit `.js` import paths, so projects on `moduleResolution: node16`/`nodenext` get the package's types (TS2834 before).
