@@ -694,12 +694,31 @@ export class QueryBuilder<
     perPage: number;
     pages: number;
   } {
-    const total = this.count();
-    const pages = Math.ceil(total / perPage);
-    this.iqo.limit = perPage;
-    this.iqo.offset = (page - 1) * perPage;
-    const data = this.all();
-    return { data, total, page, perPage, pages };
+    if (!Number.isSafeInteger(page) || page < 1)
+      throw new TypeError(`paginate(): page must be an integer >= 1, got ${page}`);
+    if (!Number.isSafeInteger(perPage) || perPage < 1 || perPage > 10_000)
+      throw new TypeError(`paginate(): perPage must be an integer from 1 to 10000, got ${perPage}`);
+    // Work on the query as given, without changing this builder.
+    const saved = { limit: this.iqo.limit, offset: this.iqo.offset, orderBy: this.iqo.orderBy };
+    try {
+      this.iqo.limit = null;
+      this.iqo.offset = null;
+      // Count the whole result set (correct with groupBy and distinct too).
+      const { sql: allSql, params } = compileIQO(this.tableName, this.iqo);
+      const countSql = `SELECT COUNT(*) AS count FROM (${allSql})`;
+      const total = Number((this.executor(countSql, params, true)[0] as any)?.count ?? 0);
+      // Without an order, rows can repeat or go missing between pages.
+      if (this.iqo.orderBy.length === 0)
+        this.iqo.orderBy = [{ field: "id", direction: "asc" } as any];
+      this.iqo.limit = perPage;
+      this.iqo.offset = (page - 1) * perPage;
+      const data = this.all();
+      return { data, total, page, perPage, pages: Math.ceil(total / perPage) };
+    } finally {
+      this.iqo.limit = saved.limit;
+      this.iqo.offset = saved.offset;
+      this.iqo.orderBy = saved.orderBy;
+    }
   }
 
   /**
