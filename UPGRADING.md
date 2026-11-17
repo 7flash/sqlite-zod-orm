@@ -472,6 +472,10 @@ Unknown operators inside `$or`, malformed `$in`/`$between` values, and more than
 
 Also now rejected with an error: an `orderBy()` direction other than `asc`/`desc`, and a `limit()` or `offset()` that is not a non-negative integer (for example a string from a query parameter: convert with `Number()` and check it first). Generated SQL quotes every identifier, so tests that compare SQL text see `"users"."name"` instead of `users.name`.
 
+## 12. Before-hooks must be synchronous
+
+An `async` `beforeInsert`, `beforeUpdate` or `beforeDelete` now throws `Lifecycle hook <table>.<hook> must be synchronous`. It never worked as intended (the write did not wait, and an async `beforeDelete` could not cancel the delete). Make the hook synchronous, or move the async work to an after-hook, which may be async.
+
 ## Upgrade checklist
 
 Before deploying version 4.0.0:
