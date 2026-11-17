@@ -82,6 +82,7 @@ class _Database<Schemas extends SchemaMap> {
   private _reactive: boolean;
   private _timestamps: boolean;
   private _softDeletes: boolean;
+  private _renames: Record<string, Record<string, string>> = {};
   private _debug: boolean;
   private schemas: Schemas;
   private allSchemas: SchemaMap;
@@ -186,11 +187,25 @@ class _Database<Schemas extends SchemaMap> {
     this._reactive = options.reactive !== false; // default true
     this._timestamps = options.timestamps === true;
     this._softDeletes = options.softDeletes === true;
+    this._renames = options.renames ?? {};
     this._pollInterval = options.pollInterval ?? 100;
     try {
       this.relationships = options.relations
         ? parseRelationsConfig(options.relations, this.allSchemas)
         : [];
+      // A rename must name a real table and a field of its schema.
+      for (const [table, pairs] of Object.entries(this._renames)) {
+        const schema = this.schemas[table];
+        if (!schema) throw new Error(`renames: unknown table '${table}'`);
+        const fields = new Set(getStorableFields(schema).map((f) => f.name));
+        for (const [from, to] of Object.entries(pairs)) {
+          if (from === to) throw new Error(`renames.${table}: '${from}' is renamed to itself`);
+          if (!fields.has(to))
+            throw new Error(`renames.${table}.${from}: target '${to}' is not a field of the '${table}' schema`);
+          if (fields.has(from))
+            throw new Error(`renames.${table}.${from}: '${from}' is still a field of the schema; remove it or the rename`);
+        }
+      }
       // A misspelt cascade entry would silently never cascade: refuse it.
       for (const [parent, children] of Object.entries(options.cascade ?? {})) {
         if (!this.schemas[parent])
@@ -502,8 +517,14 @@ class _Database<Schemas extends SchemaMap> {
       }
     }
     if (additions.length) {
+      // A declared rename moves the column's values; it is not a loss.
+      const renameSources = new Set(
+        Object.entries(this._renames[entityName] ?? {})
+          .filter(([, to]) => additions.includes(to))
+          .map(([from]) => from),
+      );
       const removed = columns.find((column) =>
-        !expected.has(column.name) && populated(column.name));
+        !expected.has(column.name) && !renameSources.has(column.name) && populated(column.name));
       if (removed) {
         throw new Error(
           `Cannot automatically drop populated column "${entityName}.${removed.name}" ` +
@@ -633,8 +654,14 @@ class _Database<Schemas extends SchemaMap> {
           name: string;
         }[]
       ).map((c) => c.name);
+      const renamedFrom = new Map(
+        Object.entries(this._renames[entityName] ?? {}).map(([from, to]) => [to, from]),
+      );
       const expressions = columns.map((name) => {
         if (oldColumns.has(name)) return q(name);
+        // A declared rename: carry the old column's values into the new name.
+        const from = renamedFrom.get(name);
+        if (from && oldColumns.has(from)) return q(from);
         const field = getStorableFields(schema).find((f) => f.name === name);
         const parsed = field?.type.safeParse(undefined);
         if (

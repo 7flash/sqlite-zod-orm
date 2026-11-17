@@ -4,6 +4,7 @@
 
 ### Added
 
+- `renames: { table: { oldField: "newField" } }`: a schema rebuild copies the old column's values into the renamed field instead of refusing to drop the populated column.
 - `sqlite-zod-orm upgrade-check [dir] [--json]` lists the code in an app that the 4.0 changes affect, with the UPGRADING.md section for each.
 
 ### Security

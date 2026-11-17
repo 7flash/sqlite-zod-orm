@@ -143,6 +143,18 @@ displayName: z.string(),
 
 If the new field is not a direct rename, populate it explicitly and migrate the table to its final structure before ORM initialization.
 
+### Renaming a field
+
+Renaming a field (`name` to `fullName`) drops a populated column and adds another, which is refused as above. Declare the rename instead, and the rebuild copies the values:
+
+```ts
+new Database("app.db", { users: z.object({ fullName: z.string() }) }, {
+  renames: { users: { name: "fullName" } },
+});
+```
+
+Once the old column is gone, the entry does nothing, so it can stay in place for every environment to catch up.
+
 ## 4. Preserve legacy constraints during rebuilds
 
 Error you will see:

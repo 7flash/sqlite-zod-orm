@@ -96,6 +96,13 @@ export type DatabaseOptions<
    */
   softDeletes?: boolean;
   /**
+   * Field renames applied when a schema change rebuilds a table: the old
+   * column's values are copied into the new field instead of leaving it
+   * empty. `{ users: { name: "fullName" } }` renames users.name to fullName.
+   * Once the old column is gone the entry does nothing, so it can stay.
+   */
+  renames?: Record<string, Record<string, string>>;
+  /**
    * Log every SQL query to the console. Useful for debugging.
    * Default: `false`.
    */
