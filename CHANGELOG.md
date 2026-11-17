@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Type declarations use explicit `.js` import paths, so projects on `moduleResolution: node16`/`nodenext` get the package's types (TS2834 before).
 - Change listeners: an async listener that rejects no longer causes an unhandled rejection, and unsubscribing a listener from inside another listener takes effect for the change being dispatched.
 - `upsert(conditions, data)` takes the write lock before its lookup, so two connections upserting the same key no longer race into a UNIQUE error; its after-hooks run only after commit.
 - Rows with multiple foreign keys referencing the same table now load the correct related record for each key instead of mixing up related records.
