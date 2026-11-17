@@ -191,6 +191,22 @@ class _Database<Schemas extends SchemaMap> {
       this.relationships = options.relations
         ? parseRelationsConfig(options.relations, this.allSchemas)
         : [];
+      // A misspelt cascade entry would silently never cascade: refuse it.
+      for (const [parent, children] of Object.entries(options.cascade ?? {})) {
+        if (!this.schemas[parent])
+          throw new Error(`cascade: unknown table '${parent}'`);
+        for (const child of children) {
+          if (!this.schemas[child])
+            throw new Error(`cascade: unknown table '${child}' in cascade.${parent}`);
+          const linked = this.relationships.some(
+            (r) => r.type === "belongs-to" && r.from === child && r.to === parent,
+          );
+          if (!linked)
+            throw new Error(
+              `cascade: '${child}' has no relation to '${parent}'; add it to relations (e.g. relations.${child}.<${parent}_id>: '${parent}')`,
+            );
+        }
+      }
     } catch (error) {
       this.db.close(true);
       throw error;

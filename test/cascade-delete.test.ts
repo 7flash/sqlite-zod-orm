@@ -98,3 +98,13 @@ test("nullable FK is nulled only for hard deletes without configured cascade", (
     db.close();
   }
 });
+
+test("a cascade entry naming an unknown or unrelated table is refused at startup", () => {
+  const schemas = { authors: z.object({ name: z.string() }), books: z.object({ title: z.string(), author_id: z.number() }) };
+  const open = (opts: any) => () => new Database(":memory:", schemas, { reactive: false, ...opts }).close();
+  expect(open({ cascade: { writers: ["books"] } })).toThrow("cascade: unknown table 'writers'");
+  expect(open({ relations: { books: { author_id: "authors" } }, cascade: { authors: ["pamphlets"] } }))
+    .toThrow("cascade: unknown table 'pamphlets'");
+  expect(open({ cascade: { authors: ["books"] } })).toThrow("has no relation to 'authors'");
+  expect(open({ relations: { books: { author_id: "authors" } }, cascade: { authors: ["books"] } })).not.toThrow();
+});
