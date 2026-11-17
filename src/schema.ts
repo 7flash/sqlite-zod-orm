@@ -117,10 +117,17 @@ export function zodTypeToSqlType(zodType: ZodType): string {
 /** Transform JS values to SQLite storage format */
 export function transformForStorage(
   data: Record<string, any>,
+  schema?: z.ZodType<any>,
 ): Record<string, any> {
   const transformed: Record<string, any> = {};
+  const shape = schema ? asZodObject(schema).shape : undefined;
   for (const [key, value] of Object.entries(data)) {
-    if (value instanceof Date) {
+    if (shape && value !== null && value !== undefined && !(value instanceof Buffer) &&
+        isAnyValueSchema(unwrapField(shape[key]))) {
+      // z.any()/z.unknown(): store every value as JSON so it reads back with its type.
+      transformed[key] = JSON.stringify(value, (_key, v) =>
+        typeof v === "bigint" ? v.toString() : v);
+    } else if (value instanceof Date) {
       transformed[key] = value.toISOString();
     } else if (typeof value === "boolean") {
       transformed[key] = value ? 1 : 0;
@@ -149,18 +156,15 @@ export function transformFromStorage(
 ): Record<string, any> {
   const transformed: Record<string, any> = {};
   for (const [key, value] of Object.entries(row)) {
-    let fieldSchema = asZodObject(schema).shape[key];
-    while (
-      fieldSchema instanceof z.ZodOptional ||
-      fieldSchema instanceof z.ZodNullable ||
-      fieldSchema instanceof z.ZodDefault ||
-      fieldSchema instanceof z.ZodPrefault ||
-      fieldSchema instanceof z.ZodReadonly ||
-      fieldSchema instanceof z.ZodNonOptional
-    ) {
-      fieldSchema = fieldSchema.unwrap();
-    }
-    if (fieldSchema instanceof z.ZodDate && typeof value === "string") {
+    const fieldSchema = unwrapField(asZodObject(schema).shape[key]);
+    if (isAnyValueSchema(fieldSchema) && typeof value === "string") {
+      // JSON written by 4.0.2+; plain text written by older versions stays as it is.
+      try {
+        transformed[key] = JSON.parse(value);
+      } catch {
+        transformed[key] = value;
+      }
+    } else if (fieldSchema instanceof z.ZodDate && typeof value === "string") {
       transformed[key] = new Date(value);
     } else if (
       fieldSchema instanceof z.ZodBoolean &&
@@ -228,6 +232,24 @@ function revive(value: any, schema: z.core.$ZodType | undefined): any {
 }
 
 /** Check if a Zod schema represents a JSON-serializable type */
+function unwrapField(fieldSchema: any): any {
+  while (
+    fieldSchema instanceof z.ZodOptional ||
+    fieldSchema instanceof z.ZodNullable ||
+    fieldSchema instanceof z.ZodDefault ||
+    fieldSchema instanceof z.ZodPrefault ||
+    fieldSchema instanceof z.ZodReadonly ||
+    fieldSchema instanceof z.ZodNonOptional
+  ) {
+    fieldSchema = fieldSchema.unwrap();
+  }
+  return fieldSchema;
+}
+
+function isAnyValueSchema(schema: any): boolean {
+  return schema instanceof z.ZodAny || schema instanceof z.ZodUnknown;
+}
+
 function isJsonSchema(schema: any): boolean {
   if (!schema) return false;
   return (

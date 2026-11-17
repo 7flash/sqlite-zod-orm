@@ -1,5 +1,10 @@
 # Changelog
 
+## 4.0.2 (2026-11-18)
+
+- Fixed: `z.any()` and `z.unknown()` columns read back as text. Objects came back as JSON strings, and numbers and booleans as strings. They now store every value as JSON and read it back with its type. Rows written by older versions still read: JSON text is parsed, and other text is returned as it is.
+- Note: a `where()` on a `z.any()` column compares against the stored JSON, so a string value written by 4.0.2 is stored with quotes (`"x"`). Filter such columns with `whereRaw` or move the value to a typed field.
+
 ## 4.0.1 (2026-11-17)
 
 - Fixed: `bunx sqlite-zod-orm upgrade-check .` (and the other CLI commands) now work from the npm package; 4.0.0 shipped the CLI without registering the `sqlite-zod-orm` command.

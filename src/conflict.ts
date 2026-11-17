@@ -140,7 +140,7 @@ function prepareInsertData(
   }
 
   const validatedData = asZodObject(schema).passthrough().parse(inputData);
-  const transformed = transformForStorage(validatedData);
+  const transformed = transformForStorage(validatedData, schema);
 
   if (ctx.timestamps) {
     const now = new Date().toISOString();

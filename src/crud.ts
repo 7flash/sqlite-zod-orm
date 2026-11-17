@@ -142,7 +142,7 @@ function executeInsert<T extends Record<string, any>>(
   }
 
   const validatedData = asZodObject(schema).passthrough().parse(inputData);
-  const transformed = transformForStorage(validatedData);
+  const transformed = transformForStorage(validatedData, schema);
 
   // Auto-inject timestamps
   if (ctx.timestamps) {
@@ -204,7 +204,7 @@ export function update<T extends Record<string, any>>(
   }
 
   const validatedData = asZodObject(schema).partial().parse(inputData);
-  const transformed = transformForStorage(validatedData);
+  const transformed = transformForStorage(validatedData, schema);
   if (Object.keys(transformed).length === 0 && !ctx.timestamps)
     return getById(ctx, entityName, id);
 
@@ -240,7 +240,7 @@ export function updateWhere(
 ): number {
   const schema = ctx.schemas[entityName]!;
   const validatedData = asZodObject(schema).partial().parse(data);
-  const transformed = transformForStorage(validatedData);
+  const transformed = transformForStorage(validatedData, schema);
   if (Object.keys(transformed).length === 0) return 0;
 
   const { clause, values: whereValues } = ctx.buildWhereClause(conditions);
@@ -535,7 +535,7 @@ export function insertMany<T extends Record<string, any>>(
       }
 
       const validatedData = zodSchema.parse(inputData);
-      const transformed = transformForStorage(validatedData);
+      const transformed = transformForStorage(validatedData, schema);
 
       if (ctx.timestamps) {
         const now = new Date().toISOString();
