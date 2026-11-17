@@ -1,5 +1,9 @@
 # Changelog
 
+## 4.0.1 (2026-11-17)
+
+- Fixed: `bunx sqlite-zod-orm upgrade-check .` (and the other CLI commands) now work from the npm package; 4.0.0 shipped the CLI without registering the `sqlite-zod-orm` command.
+
 ## 4.0.0 (2026-11-17)
 
 ### Added
