@@ -238,6 +238,15 @@ export function update<T extends Record<string, any>>(
   return updated;
 }
 
+/**
+ * Rows changed by the statement just run. Bun's `run().changes` also counts
+ * rows written by triggers (the change journal), which doubled every bulk
+ * count; SQLite's changes() counts only the statement's own table.
+ */
+function statementChanges(ctx: DatabaseContext): number {
+  return (ctx._stmt("SELECT changes() AS n").get() as { n: number }).n;
+}
+
 /** Bulk SQL update: deliberately bypasses per-row beforeUpdate/afterUpdate hooks. */
 export function updateWhere(
   ctx: DatabaseContext,
@@ -256,11 +265,11 @@ export function updateWhere(
 
   const setCols = Object.keys(transformed);
   const setClause = setCols.map((key) => `${qi(key)} = ?`).join(", ");
-  const result = ctx
+  ctx
     ._stmt(`UPDATE ${qi(entityName)} SET ${setClause} ${visibleWhere(ctx, entityName, clause)}`)
     .run(...setCols.map((key) => transformed[key]), ...whereValues);
 
-  return (result as any).changes ?? 0;
+  return statementChanges(ctx);
 }
 
 export function createUpdateBuilder(
@@ -506,17 +515,19 @@ export function deleteWhere(
     // Soft delete: set deletedAt instead of removing rows
     const now = deletionTimestamp();
     const sql = `UPDATE ${qi(entityName)} SET "deletedAt" = ? ${clause} AND "deletedAt" IS NULL`;
-    const result = ctx._m(`SQL: ${sql.slice(0, 50)}`, () =>
+    ctx._m(`SQL: ${sql.slice(0, 50)}`, () =>
       ctx._stmt(sql).run(now, ...values),
     );
-    return (result as any).changes ?? 0;
+
+    return statementChanges(ctx);
   }
 
   const sql = `DELETE FROM ${qi(entityName)} ${clause}`;
-  const result = ctx._m(`SQL: ${sql.slice(0, 50)}`, () =>
+  ctx._m(`SQL: ${sql.slice(0, 50)}`, () =>
     ctx._stmt(sql).run(...values),
   );
-  return (result as any).changes ?? 0;
+
+  return statementChanges(ctx);
 }
 
 /** Create a fluent delete builder: db.table.delete().where({...}).exec() */

@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.0.11 (2026-11-18)
+
+Found by running the library for real (`scripts/upgrade-e2e.ts`: builds a database with an old published version, opens the same file with this one, compares every field, writes, and runs `.on()` across two processes):
+
+- Fixed: `update().where().exec()` and `delete().where().exec()` returned twice the number of rows changed when change tracking was on (the default). Bun's statement `changes` also counts the rows the change-journal trigger writes; the count now comes from SQLite's `changes()`, which counts only the table's own rows. The rows changed were always the right ones.
+- Added: `scripts/upgrade-e2e.ts [--from 3.34.0] [--to local|<version>]`. Upgrades from 3.26.1, 3.34.0 and 4.0.3 pass all 12 checks: no stored row changes on open, every field reads back the same, partial updates keep other fields, cascade soft delete and restore, live events across processes.
+
 ## 4.0.10 (2026-11-18)
 
 Found by a change-feed matrix (`test/change-feed-matrix.test.ts`: two ORM connections and a bare `bun:sqlite` connection on one file, rollbacks and savepoints, bulk and raw writes, cascades, hooks, migrations, soft deletes, and 4,096 seeded write sequences, each checked for the exact events `.on()` delivers):
