@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.2.3 (2026-11-18)
+
+Every code example in README.md and UPGRADING.md now runs. `scripts/docs-examples.ts` extracts all 51 TypeScript examples, runs each against a fresh database, type-checks it and asserts every `// =>` result the text promises (`test/docs-examples.test.ts` runs it with the suite). On its first real run 47 of 51 passed. Most examples had been fragments that could not run at all.
+
+- Fixed (docs): about 30 examples.
+  - Some used schemas, fields or variables they never declared (`role`, `orders`, `AuthorSchema`).
+  - Some showed invented results: pagination `{ total: 42 }`, a schema diff without a change.
+  - `orderBy('score', 'DESC')` did not compile; it must be lowercase `'desc'`.
+  - `load(..., { append: true })` reused existing ids.
+- Fixed (types): `upsertMany` rows may carry an `id`, as `upsert` already allowed.
+- Added (types): `join('agents', 'authorRef', ['name'])` types the joined columns as `agents_name` etc., from the joined table's schema; a column not listed is a type error. UPGRADING's own join example did not compile before.
+- Nine real apps type-check with no new errors.
+
 ## 4.2.2 (2026-11-18)
 
 Second speed round, same behaviour (7,607 tests pass). Speed relative to hand-written bun:sqlite on the same machine (10k rows, default options), 4.2.0 -> 4.2.2:

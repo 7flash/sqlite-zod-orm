@@ -18,41 +18,36 @@ Back up the database before upgrading and test initialization against a copy con
 
 Apply explicit data migrations before constructing the ORM database. Schema synchronization occurs during database initialization.
 
-The following helper can be used for the SQL examples in this guide:
+The following helpers are shared by the subsequent SQL examples. Each migration example is executed on a separately prepared disposable `app.db` with the columns described in its section:
 
 ```typescript
-import { Database as SQLite } from "bun:sqlite";
+import { Database, z, op } from 'sqlite-zod-orm';
+import { Database as SQLite } from 'bun:sqlite';
 
 function migrate(sql: string): void {
-const sqlite = new SQLite("app.db");
-
-sqlite.exec("PRAGMA foreign_keys = OFF");
-
-try {
-sqlite.exec("BEGIN IMMEDIATE");
-
-try {
-sqlite.exec(sql);
-
-const violations = sqlite
-.query("PRAGMA foreign_key_check")
-.all();
-
-if (violations.length > 0) {
-throw new Error(
-`Foreign-key violations: ${JSON.stringify(violations)}`
-);
+    const sqlite = new SQLite('app.db');
+    sqlite.exec('PRAGMA foreign_keys = OFF');
+    try {
+        sqlite.exec('BEGIN IMMEDIATE');
+        try {
+            sqlite.exec(sql);
+            const violations = sqlite.query('PRAGMA foreign_key_check').all();
+            if (violations.length) throw new Error(`Foreign-key violations: ${JSON.stringify(violations)}`);
+            sqlite.exec('COMMIT');
+        } catch (error) {
+            sqlite.exec('ROLLBACK');
+            throw error;
+        }
+    } finally {
+        sqlite.exec('PRAGMA foreign_keys = ON');
+        sqlite.close();
+    }
 }
 
-sqlite.exec("COMMIT");
-} catch (error) {
-sqlite.exec("ROLLBACK");
-throw error;
-}
-} finally {
-sqlite.exec("PRAGMA foreign_keys = ON");
-sqlite.close();
-}
+function inspect<T extends Record<string, unknown>>(sql: string): T[] {
+    const sqlite = new SQLite('app.db');
+    try { return sqlite.query(sql).all() as T[]; }
+    finally { sqlite.close(); }
 }
 ```
 
@@ -73,17 +68,15 @@ Schema synchronization rejects changes to the declared type of a populated colum
 For example, changing:
 
 ```typescript
-const UserSchema = z.object({
-age: z.string(),
-});
+const UserSchema = z.object({ age: z.string() });
+UserSchema.parse({ age: '35' }).age; // => "35"
 ```
 
 to:
 
 ```typescript
-const UserSchema = z.object({
-age: z.number(),
-});
+const UserSchema = z.object({ age: z.number() });
+UserSchema.parse({ age: 35 }).age; // => 35
 ```
 
 requires an explicit data migration.
@@ -91,21 +84,16 @@ requires an explicit data migration.
 For a `users` table containing `id`, `name`, and `age`:
 
 ```typescript
+// docs-examples: fixture age-text
 migrate(`
-CREATE TABLE users_next (
-id INTEGER PRIMARY KEY,
-name TEXT,
-age INTEGER
-);
-
+CREATE TABLE users_next (id INTEGER PRIMARY KEY, name TEXT, age INTEGER);
 INSERT INTO users_next (id, name, age)
-SELECT id, name, CAST(age AS INTEGER)
-FROM users;
-
+SELECT id, name, CAST(age AS INTEGER) FROM users;
 DROP TABLE users;
-
 ALTER TABLE users_next RENAME TO users;
 `);
+inspect<{ age: number }>('SELECT age FROM users')[0]?.age; // => 35
+inspect<{ type: string }>("SELECT typeof(age) AS type FROM users")[0]?.type; // => "integer"
 ```
 
 Validate existing values before conversion. SQLite can convert invalid numeric strings to zero, so a successful cast does not guarantee correct data.
@@ -127,18 +115,16 @@ A column removal must not silently discard populated data. This also matters whe
 Before changing the Zod schema, rename the SQLite column:
 
 ```typescript
-migrate(`
-ALTER TABLE users
-RENAME COLUMN full_name TO displayName;
-`);
+// docs-examples: fixture full-name
+migrate(`ALTER TABLE users RENAME COLUMN full_name TO displayName;`);
+inspect<{ displayName: string }>('SELECT displayName FROM users')[0]?.displayName; // => "Alice Smith"
 ```
 
 Then update the schema:
 
 ```typescript
-const UserSchema = z.object({
-displayName: z.string(),
-});
+const UserSchema = z.object({ displayName: z.string() });
+UserSchema.parse({ displayName: 'Alice Smith' }).displayName; // => "Alice Smith"
 ```
 
 If the new field is not a direct rename, populate it explicitly and migrate the table to its final structure before ORM initialization.
@@ -148,9 +134,12 @@ If the new field is not a direct rename, populate it explicitly and migrate the 
 Renaming a field (`name` to `fullName`) drops a populated column and adds another, which is refused as above. Declare the rename instead, and the rebuild copies the values:
 
 ```ts
-new Database("app.db", { users: z.object({ fullName: z.string() }) }, {
-  renames: { users: { name: "fullName" } },
+// docs-examples: fixture name-column
+const db = new Database('app.db', { users: z.object({ fullName: z.string() }) }, {
+    renames: { users: { name: 'fullName' } },
 });
+db.users.get(1)?.fullName; // => "Alice Smith"
+db.close();
 ```
 
 Once the old column is gone, the entry does nothing, so it can stay in place for every environment to catch up.
@@ -168,18 +157,12 @@ Automatic reconstruction checks existing table constraints.
 Inspect existing definitions before changing schemas:
 
 ```typescript
-import { Database as SQLite } from "bun:sqlite";
-
-const sqlite = new SQLite("app.db");
-
+// docs-examples: fixture users-basic
+const sqlite = new SQLite('app.db');
 const definition = sqlite.query(`
-SELECT sql
-FROM sqlite_schema
-WHERE type = 'table' AND name = 'users'
-`).get();
-
-console.log(definition);
-
+    SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'users'
+`).get() as { sql: string } | null;
+Boolean(definition?.sql?.includes('CREATE TABLE users')); // => true
 sqlite.close();
 ```
 
@@ -211,38 +194,30 @@ Rebuild validation compares foreign-key definitions. A mismatch causes reconstru
 Inspect existing definitions:
 
 ```typescript
-const sqlite = new SQLite("app.db");
-
-const foreignKeys = sqlite
-.query("PRAGMA foreign_key_list(grants)")
-.all();
-
-console.table(foreignKeys);
-
+// docs-examples: fixture grants-fk
+const sqlite = new SQLite('app.db');
+const foreignKeys = sqlite.query('PRAGMA foreign_key_list(grants)').all();
+foreignKeys.length; // => 1
 sqlite.close();
 ```
 
 Compare these definitions with the schema generated in a fresh database using version 4.0.
 
-If a change to a foreign-key action is intentional, explicitly reconstruct the affected table. For example, to change an existing reference to `ON DELETE SET NULL`:
+If a change to a foreign-key action is intentional, explicitly reconstruct the affected table. For example, to change an existing reference to `ON DELETE SET NULL` (the checker starts with a `grants` table whose FK points at `agents`):
 
 ```typescript
+// docs-examples: fixture grants-fk
 migrate(`
 CREATE TABLE grants_next (
-id INTEGER PRIMARY KEY,
-authorRef INTEGER
-REFERENCES agents(id)
-ON DELETE SET NULL
+    id INTEGER PRIMARY KEY,
+    authorRef INTEGER REFERENCES agents(id) ON DELETE SET NULL
 );
-
 INSERT INTO grants_next (id, authorRef)
-SELECT id, authorRef
-FROM grants;
-
+SELECT id, authorRef FROM grants;
 DROP TABLE grants;
-
 ALTER TABLE grants_next RENAME TO grants;
 `);
+inspect<{ on_delete: string }>('PRAGMA foreign_key_list(grants)')[0]?.on_delete; // => "SET NULL"
 ```
 
 Use this definition only if it matches the intended relationship behavior. Preserve indexes, triggers, and other columns in the actual migration.
@@ -264,22 +239,15 @@ For indexes that cannot be reconstructed automatically, explicitly migrate the t
 For example, to replace an inline unique constraint on `users.email` with a named unique index:
 
 ```typescript
+// docs-examples: fixture users-email
 migrate(`
-CREATE TABLE users_next (
-id INTEGER PRIMARY KEY,
-email TEXT
-);
-
-INSERT INTO users_next (id, email)
-SELECT id, email FROM users;
-
+CREATE TABLE users_next (id INTEGER PRIMARY KEY, email TEXT);
+INSERT INTO users_next (id, email) SELECT id, email FROM users;
 DROP TABLE users;
-
 ALTER TABLE users_next RENAME TO users;
-
-CREATE UNIQUE INDEX users_email_unique
-ON users(email);
+CREATE UNIQUE INDEX users_email_unique ON users(email);
 `);
+inspect<{ name: string }>("PRAGMA index_list(users)").some(row => row.name === 'users_email_unique'); // => true
 ```
 
 This example assumes `id` and `email` are the table's only columns and that the replacement index has the intended conflict behavior.
@@ -319,17 +287,17 @@ END;
 If the intended destination column is now `displayName`, replace the trigger:
 
 ```typescript
+// docs-examples: fixture trigger-columns
 migrate(`
 DROP TRIGGER IF EXISTS posts_sync_user_name;
-
 CREATE TRIGGER posts_sync_user_name
 AFTER UPDATE OF authorName ON posts
 BEGIN
-UPDATE users
-SET displayName = NEW.authorName
-WHERE id = NEW.authorRef;
+    UPDATE users SET displayName = NEW.authorName WHERE id = NEW.authorRef;
 END;
 `);
+migrate(`UPDATE posts SET authorName = 'Alice Updated' WHERE id = 1;`);
+inspect<{ displayName: string }>('SELECT displayName FROM users WHERE id = 1')[0]?.displayName; // => "Alice Updated"
 ```
 
 Ensure the referenced columns exist when the final schema is initialized.
@@ -349,69 +317,64 @@ Automatic join resolution now rejects ambiguous relationships instead of relying
 For example:
 
 ```typescript
-const db = new Database("app.db", {
-agents: AgentSchema,
-grants: GrantSchema,
-}, {
-relations: {
-grants: {
-authorRef: "agents",
-agentRef: "agents",
-auditorRef: "agents",
-},
-},
+// docs-examples: setup upgrading-joins
+const AgentSchema = z.object({ name: z.string() });
+const GrantSchema = z.object({
+    authorRef: z.number(), agentRef: z.number(), auditorRef: z.number(),
 });
+const db = new Database(':memory:', {
+    agents: AgentSchema,
+    grants: GrantSchema,
+}, {
+    relations: {
+        grants: { authorRef: 'agents', agentRef: 'agents', auditorRef: 'agents' },
+    },
+});
+const author = db.agents.insert({ name: 'Author' });
+const auditor = db.agents.insert({ name: 'Auditor' });
+db.grants.insert({ authorRef: author.id, agentRef: author.id, auditorRef: auditor.id });
 ```
+
+<!-- docs-examples: use upgrading-joins -->
 
 This query does not identify which relationship to use:
 
 ```typescript
-db.grants
-.select()
-.join("agents")
-.all();
+db.grants.select().join(db.agents).all(); // => throws /Ambiguous automatic join/
 ```
 
 Specify the intended foreign key:
 
 ```typescript
-db.grants
-.select()
-.join("agents", "authorRef", ["name"])
-.all();
+db.grants.select().join('agents', 'authorRef', ['name']).all()[0]?.agents_name; // => "Author"
 ```
 
 For a different relationship:
 
 ```typescript
-db.grants
-.select()
-.join("agents", "auditorRef", ["name"])
-.all();
+db.grants.select().join('agents', 'auditorRef', ['name']).all()[0]?.agents_name; // => "Auditor"
 ```
 
 Review joins involving multiple foreign keys to the same table, including self-referencing relationships.
 
 ## 9. Update relationship navigation accessors
 
+<!-- docs-examples: use upgrading-joins -->
+
 Relationship definitions can produce distinct inverse accessors for different foreign keys targeting the same parent table.
 
 For the relationship configuration above, update navigation and eager-loading expressions to reference the intended relationship:
 
 ```typescript
-const agent = db.agents.get(1);
-
-const authored = agent.grantsByAuthorRef();
-const audited = agent.grantsByAuditorRef();
+const agent = db.agents.get(1)!;
+agent.grantsByAuthorRef().length; // => 1
+agent.grantsByAuditorRef().length; // => 0
 ```
 
 Eager loading must use the corresponding accessor:
 
 ```typescript
-db.agents
-.select()
-.with("grantsByAuthorRef")
-.all();
+db.agents.select().with('grantsByAuthorRef').all()[0]?.grantsByAuthorRef.length; // => 1
 ```
 
 Navigation names can also acquire a `Relation` suffix when an existing field or reserved method occupies the preferred name.
@@ -423,13 +386,11 @@ relations: conflicting navigation accessor '<table>.<accessor>'
 For example, when `agentRef` is a stored field and the generated relationship accessor would collide:
 
 ```typescript
-const grant = db.grants.get(1);
-
-// Stored foreign-key value
+const grant = db.grants.get(1)!;
 const agentId = grant.agentRef;
-
-// Relationship accessor
+agentId; // => 1
 const agent = grant.agentRefRelation();
+agent?.name; // => "Author"
 ```
 
 If a relationship definition cannot be resolved, rename the conflicting foreign-key field and update its relation mapping.
@@ -458,18 +419,16 @@ Populate the field before applying the final Zod schema.
 For example:
 
 ```typescript
-migrate(`
-ALTER TABLE users
-ADD COLUMN region TEXT NOT NULL DEFAULT 'unknown';
-`);
+// docs-examples: fixture users-region
+migrate(`ALTER TABLE users ADD COLUMN region TEXT NOT NULL DEFAULT 'unknown';`);
+inspect<{ region: string }>('SELECT region FROM users')[0]?.region; // => "unknown"
 ```
 
 Then update the schema:
 
 ```typescript
-const UserSchema = z.object({
-region: z.string(),
-});
+const UserSchema = z.object({ region: z.string() });
+UserSchema.parse({ region: 'unknown' }).region; // => "unknown"
 ```
 
 Choose a default that is valid for the application's data model. When no universal default exists, use an explicit backfill based on existing records.
@@ -479,7 +438,10 @@ Choose a default that is valid for the application's data model. When no univers
 `where({ field: value })` now quotes `field` as a column name (`table.column` is allowed). A SQL expression used as a field name, for example `json_extract(data, '$.name')`, no longer works. Use `whereRaw` with bound parameters:
 
 ```ts
-db.users.select().whereRaw("json_extract(data, ?) = ?", ["$.name", name]).all();
+// docs-examples: fixture json-users
+const db = new Database('app.db', { users: z.object({ data: z.string(), name: z.string() }) });
+const name = 'Alice';
+db.users.select().whereRaw('json_extract(data, ?) = ?', ['$.name', name]).all().length; // => 1
 ```
 
 Unknown operators inside `$or`, malformed `$in`/`$between` values, and more than 32766 bound parameters in one statement now throw.
@@ -499,8 +461,13 @@ An `async` `beforeInsert`, `beforeUpdate` or `beforeDelete` now throws `Lifecycl
 A query with both a callback filter and an object filter now applies both:
 
 ```ts
-db.users.select().where({ role: "admin" }).where((c, f) => op.gt(c.age, 30)).all();
-// 3.x ignored { role: "admin" }; 4.0 returns admins over 30
+const db = new Database(':memory:', {
+    users: z.object({ role: z.string(), age: z.number() }),
+});
+db.users.insert({ role: 'admin', age: 35 });
+db.users.insert({ role: 'admin', age: 18 });
+db.users.insert({ role: 'guest', age: 40 });
+db.users.select().where({ role: 'admin' }).where((c, f) => op.gt(c.age, 30)).all().length; // => 1
 ```
 
 With `softDeletes` on, `get(id)`, joins, `.with()` and relation accessors no longer return deleted rows, and `upsert` restores a soft-deleted row with the same key instead of inserting a new one (since 4.0.7 exactly like `restore()`: orphans are refused, the rows deleted with it come back, restore hooks run). Code that relied on seeing deleted rows through these paths must opt in explicitly.

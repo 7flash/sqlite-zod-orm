@@ -28,6 +28,18 @@ import type {
 } from "./types";
 
 /**
+ * Columns a string-based join() appends, named `<table>_<column>` as the SQL
+ * aliases them, typed from the joined table's schema (stored, raw values).
+ */
+type JoinedColumns<S extends SchemaMap, J extends string, C extends string> = {
+  [K in C as `${J}_${K}`]: J extends keyof S
+    ? S[J] extends { _output: infer Out }
+      ? K extends keyof Out ? RawValue<Out[K]> : unknown
+      : unknown
+    : unknown;
+};
+
+/**
  * HAVING compiles a restricted operator subset; IN/BETWEEN/LIKE are
  * deliberately not allowed by compileIQO's HAVING compiler.
  */
@@ -328,12 +340,12 @@ export class QueryBuilder<
    */
   join(accessor: { _tableName: string }, columns?: string[]):
     QueryBuilder<T, RawRow<TResult>, S, R, Table, Selected, O, Writable>;
-  join(table: string, fk: string, columns?: string[], pk?: string):
-    QueryBuilder<T, RawRow<TResult>, S, R, Table, Selected, O, Writable>;
+  join<J extends string, C extends string = never>(table: J, fk: string, columns?: readonly C[], pk?: string):
+    QueryBuilder<T, RawRow<TResult> & JoinedColumns<S, J, C>, S, R, Table, Selected, O, Writable>;
   join(
     tableOrAccessor: string | { _tableName: string },
     fkOrCols?: string | string[],
-    colsOrPk?: string[] | string,
+    colsOrPk?: readonly string[] | string,
     pk?: string,
   ): this {
     let table: string;
@@ -361,7 +373,7 @@ export class QueryBuilder<
     } else {
       table = tableOrAccessor;
       fromCol = fkOrCols as string;
-      columns = Array.isArray(colsOrPk) ? colsOrPk : [];
+      columns = Array.isArray(colsOrPk) ? [...colsOrPk] : [];
       toCol = (typeof colsOrPk === "string" ? colsOrPk : pk) ?? "id";
     }
 

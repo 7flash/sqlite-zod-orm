@@ -543,7 +543,8 @@ export type NavEntityAccessor<
     >,
   ) => NavEntity<S, R, Table, O>;
   upsertMany: (
-    rows: Partial<z.input<S[Table & keyof S]>>[],
+    // id is allocated by SQLite and is a valid match key for existing rows.
+    rows: (Partial<z.input<S[Table & keyof S]>> & { id?: number })[],
     conditions?: Partial<z.input<S[Table & keyof S]>>,
   ) => NavEntity<S, R, Table, O>[];
   findOrCreate: (
@@ -624,7 +625,9 @@ export type EntityAccessor<S extends z.ZodType<any>> = {
     >,
   ) => AugmentedEntity<S>;
   upsertMany: (
-    rows: Partial<InferSchema<S>>[],
+    // Existing rows can be matched by the generated SQLite id, just like
+    // upsert(). The id is not a property of the user's Zod schema.
+    rows: (Partial<InferSchema<S>> & { id?: number })[],
     conditions?: Partial<InferSchema<S>>,
   ) => AugmentedEntity<S>[];
   findOrCreate: (

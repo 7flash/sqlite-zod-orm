@@ -42,3 +42,5 @@ bun.lock
 *.db
 *.db-wal
 *.db-shm
+# generated isolated TypeScript docs examples (normally cleaned up automatically)
+.docs-examples-*/

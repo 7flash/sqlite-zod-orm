@@ -14,20 +14,16 @@ Create two related tables, insert records, and query with a relationship:
 
 ```typescript
 import { Database, z } from 'sqlite-zod-orm';
-const db = new Database('app.db', {
+const db = new Database(':memory:', {
     users: z.object({ name: z.string() }),
-    posts: z.object({
-        title: z.string(),
-        user_id: z.number(),
-    }),
-}, {
-    relations: { posts: { user_id: 'users' } },
-});
+    posts: z.object({ title: z.string(), user_id: z.number() }),
+}, { relations: { posts: { user_id: 'users' } } });
 const alice = db.users.insert({ name: 'Alice' });
 const post = db.posts.insert({ title: 'Hello', user_id: alice.id });
 const posts = db.posts.select().with('user').all();
-console.log(posts[0].user); // eagerly loaded user
-console.log(post.user(), alice.posts()); // lazy forward and inverse
+posts[0]?.user?.name; // => "Alice"
+post.user()?.name; // => "Alice"
+alice.posts().length; // => 1
 ```
 
 That's it. `new Database()` creates the tables automatically. Inserts return typed entities, queries return typed results, and declared relationships provide navigation accessors and eager loading.
@@ -93,28 +89,61 @@ Tables are auto-created and auto-migrated from your Zod schemas. No SQL required
 
 Zod defines the stored fields and their TypeScript types. Database options configure relationships, generated columns, views, and other behavior.
 
-**Example scope:** The following sections demonstrate individual APIs. References to fields such as `role`, `first`, and `last`, or additional tables such as `orders`, assume those fields and tables are present in the corresponding application schema.
+**Example scope:** Sections are independent, not one program. Unless a section shows its own schema in its first block, its examples use the following shared in-memory database and seed data. The executable docs checker reuses this setup separately for each block so mutations in one example cannot affect another:
+
+```typescript
+// docs-examples: default
+import { Database, z, op } from 'sqlite-zod-orm';
+const db = new Database(':memory:', {
+    users: z.object({
+        name: z.string(), email: z.string(),
+        role: z.enum(['admin', 'guest', 'member', 'spam']).default('guest'),
+        score: z.number().default(0), age: z.number().default(0),
+        first: z.string().default(''), last: z.string().default(''),
+        data: z.string().default('{}'),
+    }),
+    orders: z.object({ userId: z.number(), amount: z.number() }),
+}, { timestamps: true, softDeletes: true });
+db.users.insert({
+    name: 'Alice', email: 'alice@co.com', role: 'admin',
+    score: 60, age: 35, first: 'Alice', last: 'Smith',
+    data: '{"name":"Alice"}',
+});
+db.users.insert({ name: 'Bob', email: 'bob@co.com', role: 'guest', score: 20, age: 22 });
+db.orders.insert({ userId: 1, amount: 100 });
+db.users.count(); // => 2
+```
+
+A trailing `// => <JSON value>` checks a result; `// => throws /pattern/` checks an expected error. The checker also enforces `@ts-expect-error` examples at compile time.
 
 ## CRUD
 
 ```typescript
 // Insert
-const user = db.users.insert({ name: 'Alice', email: 'alice@co.com' });
+const user = db.users.insert({ name: 'Charlie', email: 'charlie@co.com' });
+user.name; // => "Charlie"
 
 // Read
 const all = db.users.select().all();
-const one = db.users.get(1);
-const found = db.users.select().where({ name: 'Alice' }).first();
+all.length; // => 3
+const one = db.users.get(user.id);
+one?.name; // => "Charlie"
+const found = db.users.select().where({ name: 'Charlie' }).first();
+found?.id === user.id; // => true
 
 // Update (auto-persists via proxy)
-user.score = 100;  // ← saved to DB automatically
+user.score = 100;
+db.users.get(user.id)?.score; // => 100
 
 // Delete
-db.users.delete(1);
+db.users.delete(user.id);
+db.users.get(user.id); // => null
 
 // Batch
-db.users.insertMany([{ name: 'Bob', email: 'b@co.com' }, { name: 'Charlie', email: 'c@co.com' }]);
-db.users.upsertMany([{ id: 1, name: 'Updated Alice' }]);
+const added = db.users.insertMany([{ name: 'Dave', email: 'd@co.com' }, { name: 'Eve', email: 'e@co.com' }]);
+added.map(row => row.name); // => ["Dave","Eve"]
+db.users.upsertMany([{ id: added[0]!.id, name: 'Updated Dave' }]);
+db.users.get(added[0]!.id)?.name; // => "Updated Dave"
 ```
 
 Inserted and retrieved entities support proxy-based automatic persistence. Assigning a stored property writes the change to SQLite.
@@ -128,30 +157,35 @@ Declare foreign keys in the `relations` option:
 ```typescript
 const db = new Database(':memory:', {
     users: z.object({ name: z.string() }),
-    posts: z.object({
-        title: z.string(),
-        user_id: z.number(),
-    }),
+    posts: z.object({ title: z.string(), user_id: z.number() }),
+    agents: z.object({ name: z.string() }),
+    grants: z.object({ authorRef: z.number(), agentRef: z.number(), auditorRef: z.number() }),
 }, {
-    relations: { posts: { user_id: 'users' } },
+    relations: {
+        posts: { user_id: 'users' },
+        grants: { authorRef: 'agents', agentRef: 'agents', auditorRef: 'agents' },
+    },
 });
+const alice = db.users.insert({ name: 'Alice' });
+db.posts.insert({ title: 'Hello', user_id: alice.id });
+const agent = db.agents.insert({ name: 'Agent One' });
+db.grants.insert({ authorRef: agent.id, agentRef: agent.id, auditorRef: agent.id });
 ```
 
 Relationships support forward and inverse navigation:
 
 ```typescript
 // Navigation (lazy, proxy-based)
-const post = db.posts.get(1);
-post.user();         // → related user object
+const post = db.posts.get(1)!;
+post.user()?.name; // => "Alice"
+const user = db.users.get(1)!;
+user.posts().map(row => row.title); // => ["Hello"]
 
-const user = db.users.get(1);
-user.posts();        // → array of user's posts
-
-// Eager loading (no N+1)
-db.posts.select().with('user').all();
+// Eager loading (no per-row relation queries)
+db.posts.select().with('user').all()[0]?.user?.name; // => "Alice"
 ```
 
-The eager-loading example uses `user` because the foreign-key column is named `user_id`.
+The eager-loading example uses `user` because the foreign-key column is named `user_id`. The setup also supplies the separate `agents`/`grants` schema used by the multi-FK examples below.
 
 ### Relationship accessor names
 
@@ -179,9 +213,9 @@ For example, `grants.authorRef`, `grants.agentRef` and `grants.auditorRef`
 referencing `agents` produce:
 
 ```typescript
-agent.grantsByAuthorRef();
-agent.grantsByAgentRef();
-agent.grantsByAuditorRef();
+agent.grantsByAuthorRef().length; // => 1
+agent.grantsByAgentRef().length; // => 1
+agent.grantsByAuditorRef().length; // => 1
 ```
 
 Each returns only children matching its own FK.
@@ -199,14 +233,14 @@ functions).
 For example:
 
 ```typescript
-db.agents.select().with('grantsByAuthorRef').all();
+db.agents.select().with('grantsByAuthorRef').all()[0]?.grantsByAuthorRef.length; // => 1
 ```
 
 Automatic joins are rejected when more than one FK can connect the selected
 tables; supply the FK explicitly:
 
 ```typescript
-db.grants.select().join('agents', 'authorRef', ['name']).all();
+db.grants.select().join('agents', 'authorRef', ['name']).all().length; // => 1
 ```
 
 ## Migrations
@@ -271,8 +305,8 @@ If the timeout expires, SQLite throws rather than continuing initialization.
 Every table rebuild keeps the old table as `<table>_vN`, and none are deleted automatically. Remove old ones explicitly:
 
 ```ts
-db.migrator().prune({ keep: 1, dryRun: true }); // what would be dropped
-db.migrator().prune({ keep: 1 });               // keep the newest snapshot per table
+db.migrator().prune({ keep: 1, dryRun: true }); // inspect planned removals
+db.migrator().prune({ keep: 1 }); // keep the newest snapshot per table
 ```
 
 `prune()` only drops names `findBackups()` reports, never a registered live table, in one transaction.
@@ -284,8 +318,9 @@ db.migrator().prune({ keep: 1 });               // keep the newest snapshot per 
 Entities use proxies to persist property changes:
 
 ```typescript
-const user = db.users.get(1);
-user.score = 100; // automatically saved to SQLite
+const user = db.users.get(1)!;
+user.score = 100;
+db.users.get(1)?.score; // => 100
 ```
 
 This is write-through persistence, not a requirement to call `.save()` after
@@ -317,22 +352,23 @@ application needs to recover from these failures.
 ## Fluent Query Builder
 
 ```typescript
-db.users.select()
+const qualified = db.users.select()
     .where({ score: { $gte: 50 } })
-    .orderBy('score', 'DESC')
+    .orderBy('score', 'desc')
     .limit(10)
     .all();
+qualified.map(row => row.name); // => ["Alice"]
 
 // Operators: $gt, $gte, $lt, $lte, $ne, $like, $in, $notIn, $between
-db.users.select().where({ name: { $like: '%ali%' } }).all();
+db.users.select().where({ name: { $like: '%lic%' } }).all().length; // => 1
 
 // whereIn / whereNotIn (array or subquery)
-db.users.select().whereIn('id', [1, 2, 3]).all();
+db.users.select().whereIn('id', [1, 2, 3]).all().length; // => 2
 const sub = db.orders.select('userId');
-db.users.select().whereIn('id', sub).all();
+db.users.select().whereIn('id', sub).all().map(row => row.name); // => ["Alice"]
 
 // Raw WHERE fragments
-db.users.select().whereRaw('score > ? AND name != ?', [50, 'Bot']).all();
+db.users.select().whereRaw('score > ? AND name != ?', [50, 'Bot']).all().length; // => 1
 ```
 
 The query builder covers ordinary filtering, ordering, limits, and subqueries
@@ -346,20 +382,20 @@ Selecting only specific fields narrows the result type:
 
 ```typescript
 const names = db.users.select('name', 'email').all();
-
-names[0].name;  // ✅ string
-names[0].score; // ❌ TypeScript error — not selected
+names[0]!.name; // => "Alice"
+// @ts-expect-error score was not selected (compile-time error by design)
+names[0]!.score;
 ```
 
 ## Aggregates
 
 ```typescript
-db.users.count();                                   // shorthand
-db.users.select().where({ role: 'admin' }).count(); // filtered
-db.users.select().sum('score');
-db.users.select().avg('score');
-db.users.select().min('score');
-db.users.select().max('score');
+db.users.count(); // => 2
+db.users.select().where({ role: 'admin' }).count(); // => 1
+db.users.select().sum('score'); // => 80
+db.users.select().avg('score'); // => 40
+db.users.select().min('score'); // => 20
+db.users.select().max('score'); // => 60
 ```
 
 The aggregate API also includes `countGrouped`.
@@ -368,7 +404,11 @@ The aggregate API also includes `countGrouped`.
 
 ```typescript
 const page = db.users.select().orderBy('name').paginate(1, 20);
-// { data: [...], total: 42, page: 1, perPage: 20, pages: 3 }
+page.data.map(row => row.name); // => ["Alice","Bob"]
+page.total; // => 2
+page.page; // => 1
+page.perPage; // => 20
+page.pages; // => 1
 ```
 
 Pagination is offset-based.
@@ -376,8 +416,9 @@ Pagination is offset-based.
 ## Batch Mutations
 
 ```typescript
-db.users.select().where({ role: 'guest' }).updateAll({ role: 'member' }); // → affected count
-db.users.select().where({ role: 'spam' }).deleteAll();                    // → deleted count
+db.users.select().where({ role: 'guest' }).updateAll({ role: 'member' }); // => 1
+db.users.select().where({ role: 'spam' }).deleteAll(); // => 0
+db.users.select().where({ role: 'member' }).count(); // => 1
 ```
 
 Additional mutation operations include `insertMany`, `upsertMany`, and
@@ -399,27 +440,38 @@ per-row lifecycle hooks. Configured cascades still apply to bulk deletes.
 ## Cascade Deletes
 
 ```typescript
+const AuthorSchema = z.object({ name: z.string() });
+const BookSchema = z.object({ title: z.string(), author_id: z.number() });
 const db = new Database(':memory:', { authors: AuthorSchema, books: BookSchema }, {
     relations: { books: { author_id: 'authors' } },
     cascade: { authors: ['books'] },
 });
+const author = db.authors.insert({ name: 'Austen' });
+db.books.insert({ title: 'Emma', author_id: author.id });
+db.authors.delete(author.id);
+db.books.count(); // => 0
 
-db.authors.delete(1); // → books with author_id=1 also deleted
+// Cascades also apply to bulk deletes (4.2.0+).
+const second = db.authors.insert({ name: 'Brontë' });
+db.books.insert({ title: 'Jane Eyre', author_id: second.id });
+db.authors.select().where({ id: second.id }).deleteAll(); // => 1
+db.books.count(); // => 0
 ```
 
 ## Soft Deletes & Timestamps
 
 ```typescript
-// With softDeletes: true
-db.users.delete(1);                                  // sets deletedAt
-db.users.select().all();                             // excludes deleted
-db.users.select().withTrashed().all();               // includes deleted
-db.users.select().onlyTrashed().all();               // only deleted
-db.users.restore(1);                                 // un-deletes
-
-// With timestamps: true
-user.createdAt;  // auto-set on insert
-user.updatedAt;  // auto-bumped on update
+// The shared example database enables softDeletes and timestamps.
+const user = db.users.get(1)!;
+typeof user.createdAt; // => "string"
+typeof user.updatedAt; // => "string"
+db.users.delete(1); // sets deletedAt
+db.users.get(1); // => null
+db.users.select().all().length; // => 1
+db.users.select().withTrashed().all().length; // => 2
+db.users.select().onlyTrashed().all().length; // => 1
+db.users.restore(1);
+db.users.select().all().length; // => 2
 ```
 
 Both options can be enabled during database construction, as shown in
@@ -428,36 +480,58 @@ Both options can be enabled during database construction, as shown in
 ## Computed Getters
 
 ```typescript
+const UserSchema = z.object({ first: z.string(), last: z.string() });
 const db = new Database(':memory:', { users: UserSchema }, {
-    computed: {
-        users: { fullName: (u) => `${u.first} ${u.last}` },
-    },
+    computed: { users: { fullName: (u) => `${u.first} ${u.last}` } },
 });
-
-const user = db.users.get(1);
-user.fullName; // 'Alice Smith' — recomputes on access
+const user = db.users.insert({ first: 'Alice', last: 'Smith' });
+(user as typeof user & { fullName: string }).fullName; // => "Alice Smith"
+user.last = 'Jones';
+(user as typeof user & { fullName: string }).fullName; // => "Alice Jones"
 ```
 
 Computed getters provide virtual properties without storing their values
-as additional columns.
+as additional columns. Since computed keys are not part of the Zod schema,
+TypeScript access requires an explicit property type assertion.
 
 ## Lifecycle Hooks
 
 ```typescript
+const UserSchema = z.object({ name: z.string() });
+const events: string[] = [];
 const db = new Database(':memory:', { users: UserSchema }, {
+    softDeletes: true,
     hooks: {
         users: {
             beforeInsert: (data) => ({ ...data, name: data.name.trim() }),
-            afterInsert: (entity) => console.log('Created:', entity.id),
-            beforeUpdate: (data, id) => data,
-            afterUpdate: (entity) => {},
-            beforeDelete: (id) => {},    // return false to cancel
-            afterDelete: (id) => {},
-            beforeRestore: (id) => {},   // softDeletes; return false to cancel
-            afterRestore: (id) => {},
+            afterInsert: (entity) => events.push(`insert:${entity.name}`),
+            beforeUpdate: (data, id) => ({ ...data, name: `${data.name}:${id}` }),
+            afterUpdate: (entity) => events.push(`update:${entity.name}`),
+            beforeDelete: (id) => { events.push(`beforeDelete:${id}`); },
+            afterDelete: (id) => { events.push(`delete:${id}`); },
+            beforeRestore: (id) => { events.push(`beforeRestore:${id}`); },
+            afterRestore: (id) => { events.push(`restore:${id}`); },
         },
     },
 });
+const user = db.users.insert({ name: ' Alice ' });
+user.name; // => "Alice"
+events; // => ["insert:Alice"]
+db.users.update(user.id, { name: 'Updated' });
+db.users.get(user.id)?.name; // => "Updated:1"
+events.slice(-1); // => ["update:Updated:1"]
+db.users.delete(user.id);
+events.slice(-2); // => ["beforeDelete:1","delete:1"]
+db.users.restore(user.id);
+events.slice(-2); // => ["beforeRestore:1","restore:1"]
+// After-hooks wait until the outermost transaction commits.
+let insideEventCount = -1;
+db.transaction(() => {
+    db.users.insert({ name: ' Later ' });
+    insideEventCount = events.length;
+});
+insideEventCount; // => 6
+events.at(-1); // => "insert:Later"
 ```
 
 Hooks cover before/after insert, update, delete, and soft-delete restore.
@@ -482,9 +556,11 @@ merged row. `doNothing: true` dispatches no after-hook on a conflict.
 
 ```typescript
 db.transaction(() => {
-    db.users.insert({ name: 'Alice' });
-    db.orders.insert({ userId: 1, amount: 100 });
+    db.users.insert({ name: 'Charlie', email: 'charlie@co.com' });
+    db.orders.insert({ userId: 3, amount: 100 });
 }); // auto-commits; rolls back on error
+db.users.count(); // => 3
+db.orders.count(); // => 2
 ```
 
 Transactions are synchronous and default to `BEGIN IMMEDIATE`, acquiring the write
@@ -497,15 +573,17 @@ Callbacks are never automatically replayed. Nested transactions use savepoints.
 For read-only work or deliberate alternative locking, pass:
 
 ```typescript
-db.transaction(work, { mode: 'deferred' });
-db.transaction(work, { mode: 'exclusive' });
+const work = () => db.users.count();
+db.transaction(work, { mode: 'deferred' }); // => 2
+db.transaction(work, { mode: 'exclusive' }); // => 2
 ```
 
 ## Schema Diffing
 
 ```typescript
+// The constructor has synchronized the schema; no differences remain.
 const diff = db.diff();
-// { users: { added: ['bio'], removed: ['legacy'], typeChanged: [] } }
+diff; // => {}
 ```
 
 Schema diffing exposes added, removed, and type-changed fields.
@@ -516,10 +594,16 @@ For safety rules governing automatic reconstruction, see
 ## Data Import / Export
 
 ```typescript
-const backup = db.dump();                      // export all tables as JSON
-db.load(backup);                               // restore (truncates first)
-db.load(backup, { append: true });             // restore without truncating
-db.seed({ users: [{ name: 'Test User' }] });   // additive fixture seeding
+const backup = db.dump(); // export tables as JSON-compatible rows
+backup.users?.length; // => 2
+db.load(backup); // replace all rows, retaining their ids
+db.users.count(); // => 2
+// Appending identical rows would violate primary keys; use a different id.
+const additional = { users: [{ ...backup.users![0]!, id: 100 }] };
+db.load(additional, { append: true });
+db.users.count(); // => 3
+db.seed({ users: [{ name: 'Test User', email: 'test@co.com', role: 'guest', score: 0, age: 0, first: '', last: '', data: '{}' }] });
+db.users.count(); // => 4
 ```
 
 `load()` and `seed()` import raw rows without running lifecycle hooks or
@@ -533,6 +617,7 @@ and explicit recovery.
 ## Views
 
 ```typescript
+const TradeSchema = z.object({ mint: z.string(), priceSolPerToken: z.number() });
 const db = new Database(':memory:', { trades: TradeSchema }, {
     views: {
         latest_token_prices: defineView(z.object({
@@ -545,9 +630,10 @@ const db = new Database(':memory:', { trades: TradeSchema }, {
         `),
     },
 });
-
-db.latest_token_prices.select().all();  // typed rows
-db.views();                             // ['latest_token_prices']
+db.trades.insert({ mint: 'SOL', priceSolPerToken: 12 });
+db.trades.insert({ mint: 'SOL', priceSolPerToken: 15 });
+db.latest_token_prices.select().all()[0]?.latestPrice; // => 15
+db.views(); // => ["latest_token_prices"]
 ```
 
 Views are created on startup and recreated automatically when the definition
@@ -562,8 +648,10 @@ The fluent API is designed to avoid SQL for ordinary CRUD and querying, but
 raw SQL remains available when necessary:
 
 ```typescript
-db.raw<User>('SELECT * FROM users WHERE score > ?', 50);
+type UserRow = { id: number; name: string; score: number };
+db.raw<UserRow>('SELECT id, name, score FROM users WHERE score > ?', 50).length; // => 1
 db.exec('UPDATE users SET score = 0 WHERE role = ?', 'guest');
+db.users.select().where({ role: 'guest' }).first()?.score; // => 0
 ```
 
 `raw()` returns rows as SQLite stores them: booleans are `0`/`1`, and JSON, dates and big integers are text. The type parameter is only a TypeScript hint, not a conversion. Writes through `exec()` still notify change listeners.
