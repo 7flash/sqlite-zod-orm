@@ -299,7 +299,11 @@ class _Database<Schemas extends SchemaMap> {
     // replacement. Check them before committing, then enable normal enforcement.
     try {
       this.db.run("PRAGMA foreign_keys = OFF");
-      this.db
+      // Schema sync takes the write lock. SQLite's busy wait is not fair:
+      // with many processes writing in a tight loop, a newcomer can wait the
+      // whole busy timeout without once winning the lock. Nothing has been
+      // written when BEGIN IMMEDIATE itself fails, so retry a few times.
+      const syncSchema = () => this.db
         .transaction(() => {
           this._m("Reconcile indexes", () =>
             this.reconcileIndexes(options.indexes, options.unique),
@@ -337,6 +341,26 @@ class _Database<Schemas extends SchemaMap> {
           }
         })
         .immediate();
+      // SQLite's own busy wait can sleep in steps of up to a second (builds
+      // without usleep, as on Windows), so a waiting process keeps missing the
+      // short gaps between other processes' writes. After a first normal
+      // attempt, poll for the lock every few ms for up to four busy timeouts.
+      try { syncSchema(); } catch (first) {
+        const busy = (e: unknown) => (e as { code?: string })?.code === "SQLITE_BUSY";
+        if (!busy(first) || busyTimeout === 0 || this.db.inTransaction) throw first;
+        const giveUpAt = Date.now() + busyTimeout * 3;
+        this.db.run("PRAGMA busy_timeout = 0");
+        try {
+          for (;;) {
+            try { syncSchema(); break; } catch (error) {
+              if (!busy(error) || this.db.inTransaction || Date.now() >= giveUpAt) throw error;
+              Bun.sleepSync(1 + Math.floor(Math.random() * 4));
+            }
+          }
+        } finally {
+          this.db.run(`PRAGMA busy_timeout = ${busyTimeout}`);
+        }
+      }
       this.db.run("PRAGMA foreign_keys = ON");
     } catch (error) {
       this.db.close(true);

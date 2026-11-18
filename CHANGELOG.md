@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.2.4 (2026-11-18)
+
+Found by running 1, 4 and 16 real writer processes on one file (a ChatGPT load-test job proposed a larger redesign; it is parked on branch `multiprocess-proposal`, because it would have made stale entity assignments throw and every write store a full row copy, and none of that was measured).
+
+- Fixed: opening a database while other processes keep writing failed with `database is locked`. With 16 writers, 11 to 13 of the 16 processes failed to start. SQLite's busy wait can sleep in steps of up to a second (Windows builds), so a newcomer kept missing the gaps between other writes. The startup schema step now polls for the write lock every few milliseconds for up to three busy timeouts. With 16 writers, all 16 now open.
+- Docs: README "Several Processes" with the measurements. A read, then assign outside a transaction loses updates across processes (348 of 1,694 with 4 writers), as with plain SQL; inside `db.transaction()`, 0 lost at 1, 4 and 16 writers.
+
 ## 4.2.3 (2026-11-18)
 
 Every code example in README.md and UPGRADING.md now runs. `scripts/docs-examples.ts` extracts all 51 TypeScript examples, runs each against a fresh database, type-checks it and asserts every `// =>` result the text promises (`test/docs-examples.test.ts` runs it with the suite). On its first real run 47 of 51 passed. Most examples had been fragments that could not run at all.

@@ -660,6 +660,33 @@ Raw WHERE fragments are also supported through `whereRaw()`.
 
 This is an escape hatch, not a requirement for using the ORM.
 
+## Several Processes
+
+Several processes (server workers, background jobs) can share one database file. Measured on one Windows machine, each process incrementing four shared counters in a loop for 3 seconds:
+
+| Writers | Read, then assign (`row.value = row.value + 1`) | Read and update inside `db.transaction()` |
+|---|---|---|
+| 1 | 0 lost | 0 lost |
+| 4 | 348 of 1,694 increments lost | 0 lost |
+| 16 | 872 of 5,485 increments lost | 0 lost |
+
+Read-modify-write across processes belongs in a transaction. Outside one, another process can write between your read and your write, exactly as with plain SQL:
+
+```typescript
+const db = new Database(':memory:', { counters: z.object({ value: z.number() }) });
+db.counters.insert({ value: 0 });
+db.transaction(() => {
+    const counter = db.counters.get(1)!;
+    db.counters.update(1, { value: counter.value + 1 });
+});
+db.counters.get(1)?.value; // => 1
+```
+
+
+- **Opening a database waits for other writers.** The schema step at startup takes the write lock and retries until it gets it, for up to three busy timeouts.
+- **Many tight-loop writers can still time out.** SQLite allows one writer at a time, and its busy wait can sleep in steps of up to a second on some builds (Windows among them). With 16 processes writing nonstop, 2 of 16 hit `database is locked` after the 5-second default. Raise `busyTimeout` in the Database options, or send writes through fewer processes.
+- `.on()` listeners in every process see every change. The journal keeps the newest 10,000 changes; a process that falls further behind misses the oldest ones.
+
 ## Upgrading to 4.0
 
 Run the upgrade check in your app before updating:
