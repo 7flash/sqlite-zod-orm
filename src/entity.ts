@@ -14,6 +14,7 @@ import { getById, findMany, update, deleteEntity } from "./crud";
 // a Set on each read; the proxy itself remains mandatory for auto-persist.
 const navigationCache = new WeakMap<DatabaseContext, Map<string, Relationship[]>>();
 const writableCache = new WeakMap<object, Set<string>>();
+const proxyHandlers = new WeakMap<DatabaseContext, Map<string, ProxyHandler<any>>>();
 
 function navigationFor(ctx: DatabaseContext, table: string): Relationship[] {
   let byTable = navigationCache.get(ctx);
@@ -88,24 +89,32 @@ export function attachMethods<T extends Record<string, any>>(
   // Auto-persist proxy: setting a field auto-updates the DB row
   if (isView) return augmented;
 
-  const storableFieldNames = writableFor(ctx, entityName);
-  return new Proxy(augmented, {
-    set: (target, prop: string, value) => {
-      if (storableFieldNames.has(prop) && target[prop] !== value) {
-        const saved = update(ctx, entityName, target.id, { [prop]: value });
-        // A vetoed/tombstoned write must not change the in-memory entity.
-        // beforeUpdate can transform multiple columns, and Zod can coerce
-        // the assignment: mirror the actual persisted row, not the input.
-        if (!saved) return true;
-        for (const field of storableFieldNames) {
-          if (Object.hasOwn(saved, field)) target[field] = saved[field];
+  let byTable = proxyHandlers.get(ctx);
+  if (!byTable) {
+    byTable = new Map();
+    proxyHandlers.set(ctx, byTable);
+  }
+  let handler = byTable.get(entityName);
+  if (!handler) {
+    const storableFieldNames = writableFor(ctx, entityName);
+    handler = {
+      set(target, prop, value) {
+        if (typeof prop === "string" && storableFieldNames.has(prop) && target[prop] !== value) {
+          const saved = update(ctx, entityName, target.id, { [prop]: value });
+          // A vetoed/tombstoned write must not change the in-memory entity.
+          // Keep the stored value after hook transformations and coercions.
+          if (!saved) return true;
+          for (const field of storableFieldNames) {
+            if (Object.hasOwn(saved, field)) target[field] = saved[field];
+          }
+          if (ctx.timestamps) target.updatedAt = saved.updatedAt;
+          return true;
         }
-        if (ctx.timestamps) target.updatedAt = saved.updatedAt;
+        target[prop] = value;
         return true;
-      }
-      target[prop] = value;
-      return true;
-    },
-    get: (target, prop, receiver) => Reflect.get(target, prop, receiver),
-  });
+      },
+    };
+    byTable.set(entityName, handler);
+  }
+  return new Proxy(augmented, handler);
 }

@@ -53,6 +53,7 @@ type Result = {
 const counts = [1_000, 10_000, 100_000];
 const args = process.argv.slice(2);
 let rowCounts = counts;
+let explicitRows = false;
 let output = "bench/overhead-results.json";
 let baseline: string | undefined;
 for (let i = 0; i < args.length; i++) {
@@ -61,6 +62,7 @@ for (let i = 0; i < args.length; i++) {
     const value = args[++i];
     if (!value) throw new Error("--rows requires comma-separated positive integers");
     rowCounts = value.split(",").map(Number);
+    explicitRows = true;
     if (rowCounts.some(n => !Number.isSafeInteger(n) || n < 1))
       throw new Error("--rows requires positive integers");
   } else if (flag === "--out") {
@@ -69,6 +71,18 @@ for (let i = 0; i < args.length; i++) {
     baseline = args[++i] ?? (() => { throw new Error("--check requires a path"); })();
   } else {
     throw new Error(`Unknown flag: ${flag ?? ""}`);
+  }
+}
+// A checked run compares exactly the row counts present in the supplied
+// baseline unless --rows explicitly requests a broader scope. The 4.2.1
+// baseline contains 1k and 10k; 100k is intentionally available for an
+// unchecked exploratory run (or with its own measured baseline).
+if (baseline && !explicitRows) {
+  const reference = JSON.parse(readFileSync(baseline, "utf8")) as {
+    results?: { rows: number }[];
+  };
+  if (Array.isArray(reference.results) && reference.results.length) {
+    rowCounts = [...new Set(reference.results.map((result) => result.rows))].sort((a, b) => a - b);
   }
 }
 const ISO = "2026-01-01T00:00:00.000Z";
@@ -292,6 +306,17 @@ for (const rows of rowCounts) {
         record("update(id)", choose(rows, 300),
           i => o.posts.update(i % rows + 1, { title: `u-${i}` }),
           i => rawUpdate.run(`u-${i}`, ...(opts.timestamps ? [ISO] : []), i % rows + 1));
+        // A game-tick-style read + change, measured against two handwritten
+        // prepared calls. The ORM still returns the post-write entity.
+        record("tick(get+update)", choose(rows, 300),
+          i => {
+            const row = o.posts.get(i % rows + 1);
+            if (row) o.posts.update(row.id, { title: `${row.title}-t` });
+          },
+          i => {
+            const row = rawGet.get(i % rows + 1) as { id: number; title: string } | null;
+            if (row) rawUpdate.run(`${row.title}-t`, ...(opts.timestamps ? [ISO] : []), row.id);
+          }, 1, false);
         record("bulk update", 3,
           i => o.posts.update({ title: `bulk-${i}` }).where({ score: { $gte: 390, $lt: 400 } }).exec(),
           i => {
@@ -365,7 +390,11 @@ if (baseline) {
   const failures: string[] = [];
   for (const result of results) {
     const base = previous.get(result.key);
-    if (!base || !Number.isFinite(base.ratio) || base.ratio <= 0) {
+    if (!base && result.operation === "tick(get+update)") {
+      // This newly introduced metric cannot be compared with a historical
+      // baseline. Continue checking every pre-existing operation unchanged.
+      console.log(`UNBASELINED (new metric): ${result.key}`);
+    } else if (!base || !Number.isFinite(base.ratio) || base.ratio <= 0) {
       failures.push(`missing/invalid baseline ${result.key}`);
     } else if (result.ratio < base.ratio * 0.85) {
       failures.push(`${result.key}: ${result.ratio.toFixed(3)} vs ${base.ratio.toFixed(3)} (${((1 - result.ratio / base.ratio) * 100).toFixed(1)}% worse)`);

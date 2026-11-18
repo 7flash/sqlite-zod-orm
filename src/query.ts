@@ -41,6 +41,10 @@ export type { ProxyQueryResult } from "./proxy";
 // QueryBuilder Factory
 // =============================================================================
 
+// The SQL executor / join and relation resolvers depend on context and table,
+// not on the per-call QueryBuilder's IQO. Reuse them across select() calls.
+const queryFactories = new WeakMap<DatabaseContext, Map<string, (cols: string[]) => QueryBuilder<any>>>();
+
 /**
  * Create a QueryBuilder instance wired to the database.
  *
@@ -53,6 +57,9 @@ export function createQueryBuilder(
   entityName: string,
   initialCols: string[],
 ): QueryBuilder<any> {
+  const cached = queryFactories.get(ctx)?.get(entityName);
+  if (cached) return cached(initialCols);
+
   const schema = ctx.schemas[entityName]!;
 
   const executor = (sql: string, params: any[], raw: boolean): any[] => {
@@ -68,12 +75,19 @@ export function createQueryBuilder(
         params = [new Date().toISOString(), ...params];
       }
     }
+    // Keep debug timing around hydration, but avoid the timing wrapper,
+    // interpolated label, and callback allocation when logging is disabled.
+    if (!ctx.debug) {
+      const rows = ctx._stmt(sql).all(...params);
+      if (raw) return rows;
+      return rows.map((row: any) =>
+        ctx.attachMethods(entityName, transformFromStorage(row, schema)));
+    }
     return ctx._m(`SQL: ${sql.slice(0, 60)}`, () => {
       const rows = ctx._stmt(sql).all(...params);
       if (raw) return rows;
       return rows.map((row: any) =>
-        ctx.attachMethods(entityName, transformFromStorage(row, schema)),
-      );
+        ctx.attachMethods(entityName, transformFromStorage(row, schema)));
     });
   };
 
@@ -82,8 +96,20 @@ export function createQueryBuilder(
     params: any[],
     raw: boolean,
   ): any | null => {
-    const results = executor(sql, params, raw);
-    return results.length > 0 ? results[0] : null;
+    // A point SELECT should not allocate an array of one row and invoke a
+    // mapping callback. get() retains the same row shape and null semantics.
+    if (!ctx.debug) {
+      const row = ctx._stmt(sql).get(...params);
+      if (!row) return null;
+      return raw ? row : ctx.attachMethods(
+        entityName, transformFromStorage(row as Record<string, any>, schema));
+    }
+    return ctx._m(`SQL: ${sql.slice(0, 60)}`, () => {
+      const row = ctx._stmt(sql).get(...params);
+      if (!row) return null;
+      return raw ? row : ctx.attachMethods(
+        entityName, transformFromStorage(row as Record<string, any>, schema));
+    });
   };
 
   const joinResolver = (
@@ -244,26 +270,35 @@ export function createQueryBuilder(
     return null;
   };
 
-  const builder = new QueryBuilder(
-    entityName,
-    executor,
-    singleExecutor,
-    joinResolver,
-    conditionResolver,
-    eagerLoader,
-  );
-  // Internal batch mutation delegate (not an additional public method).
-  (builder as any).deleteExecutor = (where: string, params: any[]) =>
+  const deleteExecutor = (where: string, params: any[]) =>
     deleteMatching(ctx, entityName, where, params);
-  // Join targets, including explicit joins, must also be live tables.
-  (builder as any).iqo.softDeleteTables = ctx.softDeletes
+  const liveJoinTables = ctx.softDeletes
     ? Object.keys(ctx.schemas).filter((name) => !ctx.viewNames.has(name)) : [];
-  if (initialCols.length > 0) builder.select(...initialCols);
-
-  // Auto-filter soft-deleted rows unless withTrashed() is called
-  if (ctx.softDeletes && !ctx.viewNames.has(entityName)) {
-    builder.where({ deletedAt: { $isNull: true } });
-  }
-
-  return builder;
+  const factory = (cols: string[]): QueryBuilder<any> => {
+    const builder = new QueryBuilder(
+      entityName,
+      executor,
+      singleExecutor,
+      joinResolver,
+      conditionResolver,
+      eagerLoader,
+    );
+    // Internal batch mutation delegate (not an additional public method).
+    (builder as any).deleteExecutor = deleteExecutor;
+    // Each builder keeps its own IQO/array. Share the precomputed table list,
+    // not the mutable array itself (including withTrashed/clone paths).
+    (builder as any).iqo.softDeleteTables = liveJoinTables.slice();
+    if (cols.length > 0) builder.select(...cols);
+  
+    // Auto-filter soft-deleted rows unless withTrashed() is called
+    if (ctx.softDeletes && !ctx.viewNames.has(entityName)) {
+      builder.where({ deletedAt: { $isNull: true } });
+    }
+  
+    return builder;
+  };
+  let byTable = queryFactories.get(ctx);
+  if (!byTable) queryFactories.set(ctx, byTable = new Map());
+  byTable.set(entityName, factory);
+  return factory(initialCols);
 }

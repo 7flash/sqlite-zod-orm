@@ -120,6 +120,10 @@ class _Database<Schemas extends SchemaMap> {
 
   /** Prepared statement cache — avoids re-compiling identical SQL. */
   private _stmtCache = new Map<string, ReturnType<SqliteDatabase["query"]>>();
+  // Adjacent identical queries already occupy the MRU slot. Avoid two Map
+  // mutations for every get(id) in a tight loop without changing LRU order.
+  private _lastStmtSql: string | null = null;
+  private _lastStmt: ReturnType<SqliteDatabase["query"]> | null = null;
   private _schemaRebuildLogs: string[] = [];
 
   /** After-hooks belong to their transaction/savepoint until its commit. */
@@ -154,6 +158,7 @@ class _Database<Schemas extends SchemaMap> {
 
   /** Get or create a cached prepared statement. */
   private _stmt(sql: string): ReturnType<SqliteDatabase["query"]> {
+    if (sql === this._lastStmtSql && this._lastStmt) return this._lastStmt;
     let stmt = this._stmtCache.get(sql);
     if (stmt) {
       // Move to the end: the Map's order is least to most recently used.
@@ -164,6 +169,8 @@ class _Database<Schemas extends SchemaMap> {
       stmt = this.db.prepare(sql);
     }
     this._stmtCache.set(sql, stmt);
+    this._lastStmtSql = sql;
+    this._lastStmt = stmt;
     if (this._stmtCache.size > STATEMENT_CACHE_SIZE) {
       // Forget the least recently used statement. It is not finalized here,
       // because a caller may still hold it; it is freed when collected.
@@ -342,23 +349,22 @@ class _Database<Schemas extends SchemaMap> {
     for (const entityName of Object.keys(schemas)) {
       const key = entityName as keyof Schemas;
       const accessor: EntityAccessor<Schemas[typeof key]> = {
-        get: (id: number) =>
-          this._m(`${entityName}.get`, () =>
-            getById(this._ctx, entityName, id),
-          ),
-        insert: (data) =>
-          this._m(`${entityName}.insert`, () =>
-            insert(this._ctx, entityName, data),
-          ),
+        get: (id: number) => this._debug
+          ? this._m(`${entityName}.get`, () => getById(this._ctx, entityName, id))
+          : getById(this._ctx, entityName, id),
+        insert: (data) => this._debug
+          ? this._m(`${entityName}.insert`, () => insert(this._ctx, entityName, data))
+          : insert(this._ctx, entityName, data),
         insertMany: (rows: any[]) =>
           this._m(`${entityName}.insertMany(${rows.length})`, () =>
             insertMany(this._ctx, entityName, rows),
           ),
         update: (idOrData: any, data?: any) => {
           if (typeof idOrData === "number")
-            return this._m(`${entityName}.update(${idOrData})`, () =>
-              update(this._ctx, entityName, idOrData, data),
-            );
+            return this._debug
+              ? this._m(`${entityName}.update(${idOrData})`, () =>
+                  update(this._ctx, entityName, idOrData, data))
+              : update(this._ctx, entityName, idOrData, data);
           return createUpdateBuilder(this._ctx, entityName, idOrData);
         },
         upsert: ((first: any, second?: any) =>
@@ -1252,6 +1258,8 @@ class _Database<Schemas extends SchemaMap> {
     this._stopPolling();
     for (const stmt of this._stmtCache.values()) stmt.finalize();
     this._stmtCache.clear();
+    this._lastStmtSql = null;
+    this._lastStmt = null;
     this.db.close(true);
   }
 

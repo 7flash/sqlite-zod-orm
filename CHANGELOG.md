@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.2.2 (2026-11-18)
+
+Second speed round, same behaviour (7,607 tests pass). Speed relative to hand-written bun:sqlite on the same machine (10k rows, default options), 4.2.0 -> 4.2.2:
+
+| Operation | 4.2.0 | 4.2.2 |
+|---|---|---|
+| `get(id)` | 12% | 91% |
+| `select().where()` range | 9% | 77% |
+| `.with()` one level | 10% | 69% |
+| `update(id)` | 3% | 58% |
+| get + update (game tick) | - | 74% |
+| entity property assignment | 2% | 62% |
+| `insert` | 7% | 35% |
+| `upsert` | 4% | 10% |
+
+- `update(id)` without an `afterUpdate` hook runs two statements instead of three (no extra `SELECT changes()`); it still reads the stored row back after triggers (`RETURNING` was rejected: it runs before triggers).
+- No timing callbacks or labels are built for SQL calls when debug logging is off; point-update and point-select SQL, query executors and quoted identifiers are cached; `select().get()` fetches one row instead of all.
+- Rows are decoded only for columns that need it (dates, booleans, JSON with dates, bigint, bytes); entity proxies share one handler per table.
+- `bench/overhead.ts` adds a get+update tick; new perf guards cap statements per `update(id)`.
+
 ## 4.2.1 (2026-11-18)
 
 Faster, same behaviour (all 7,603 tests pass). Measured with the new `bench/overhead.ts` (every operation against hand-written bun:sqlite at 1k and 10k rows, reactive/timestamps/softDeletes on and off; the ORM/raw ratio is compared so machine load cancels out), two runs before and after on one machine:

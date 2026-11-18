@@ -72,6 +72,43 @@ export function invokeHookSync<T>(
 const insertParsers = new WeakMap<object, any>();
 const partialParsers = new WeakMap<object, any>();
 
+// Context-scoped, order-sensitive SQL templates. User hook output can change
+// update columns at runtime; never assume a fixed shape from the Zod schema.
+const updateSqlCache = new WeakMap<DatabaseContext, Map<string, Map<string, string>>>();
+const idSqlCache = new WeakMap<DatabaseContext, Map<string, [string, string]>>();
+
+function updateSql(ctx: DatabaseContext, table: string, fields: string[]): string {
+  let tables = updateSqlCache.get(ctx);
+  if (!tables) updateSqlCache.set(ctx, tables = new Map());
+  let shapes = tables.get(table);
+  if (!shapes) tables.set(table, shapes = new Map());
+  const shape = fields.length === 1
+    ? `1:${fields[0]}` : JSON.stringify(fields); // preserves order, even for unusual names
+  let sql = shapes.get(shape);
+  if (!sql) {
+    sql = `UPDATE ${qi(table)} SET ${fields.map((key) => `${qi(key)} = ?`).join(", ")} ${visibleWhere(ctx, table, "WHERE id = ?")}`;
+    // Bounded to avoid retaining an unbounded set of unusual update shapes.
+    if (shapes.size >= 128) shapes.delete(shapes.keys().next().value!);
+    shapes.set(shape, sql);
+  }
+  return sql;
+}
+
+function getIdSql(ctx: DatabaseContext, table: string, includeDeleted: boolean): string {
+  let tables = idSqlCache.get(ctx);
+  if (!tables) idSqlCache.set(ctx, tables = new Map());
+  let sqls = tables.get(table);
+  if (!sqls) {
+    const base = `SELECT * FROM ${qi(table)} `;
+    sqls = [
+      base + visibleWhere(ctx, table, "WHERE id = ?"),
+      base + visibleWhere(ctx, table, "WHERE id = ?", true),
+    ];
+    tables.set(table, sqls);
+  }
+  return sqls[includeDeleted ? 1 : 0];
+}
+
 function insertParser(schema: object): any {
   let parser = insertParsers.get(schema);
   if (!parser) {
@@ -106,7 +143,7 @@ export function getById(
   includeDeleted = false,
 ): AugmentedEntity<any> | null {
   const row = ctx
-    ._stmt(`SELECT * FROM ${qi(entityName)} ${visibleWhere(ctx, entityName, "WHERE id = ?", includeDeleted)}`)
+    ._stmt(getIdSql(ctx, entityName, includeDeleted))
     .get(id) as any;
   if (!row) return null;
   return ctx.attachMethods(
@@ -190,10 +227,16 @@ function executeInsert<T extends Record<string, any>>(
       : `INSERT INTO ${qi(entityName)} (${quotedCols.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`;
 
   let lastId = 0;
-  ctx._m(`SQL: ${sql.slice(0, 40)}`, () => {
-    const result = ctx._stmt(sql).run(...Object.values(transformed));
-    lastId = result.lastInsertRowid as number;
-  });
+  // Debug timing is opt-in: avoid allocating a measurement closure and
+  // formatting a label for each INSERT on a normal connection.
+  const values = Object.values(transformed);
+  if (ctx.debug) {
+    ctx._m(`SQL: ${sql.slice(0, 40)}`, () => {
+      lastId = ctx._stmt(sql).run(...values).lastInsertRowid as number;
+    });
+  } else {
+    lastId = ctx._stmt(sql).run(...values).lastInsertRowid as number;
+  }
   const newEntity = getById(ctx, entityName, lastId);
   if (!newEntity) throw new Error("Failed to retrieve entity after insertion");
 
@@ -247,16 +290,28 @@ export function update<T extends Record<string, any>>(
     transformed.updatedAt = new Date().toISOString();
   }
 
-  const setClause = Object.keys(transformed)
-    .map((key) => `${qi(key)} = ?`)
-    .join(", ");
-  const sql = `UPDATE ${qi(entityName)} SET ${setClause} ${visibleWhere(ctx, entityName, "WHERE id = ?")}`;
-  const affected = ctx._m(`SQL: UPDATE ${entityName} SET ...`, () => {
-    ctx._stmt(sql).run(...Object.values(transformed), id);
-    return statementChanges(ctx);
-  });
+  const columns = Object.keys(transformed);
+  const sql = updateSql(ctx, entityName, columns);
+  const values = columns.length === 1
+    ? [transformed[columns[0]!], id]
+    : [...columns.map((key) => transformed[key]), id];
 
-  recordWrite?.(affected > 0);
+  // Without an afterUpdate hook or a write-result observer, changes() adds a
+  // full SQL round trip without affecting the returned row. Do not use this
+  // shortcut when a BEFORE UPDATE trigger may IGNORE the statement and a hook
+  // needs the exact count. Keep readback for AFTER-trigger-modified columns.
+  const needsChanges = Boolean(recordWrite || (!deferAfterHook && hooks?.afterUpdate));
+  let affected = 0;
+  if (ctx.debug) {
+    ctx._m(`SQL: UPDATE ${entityName} SET ...`, () => {
+      ctx._stmt(sql).run(...values);
+      if (needsChanges) affected = statementChanges(ctx);
+    });
+  } else {
+    ctx._stmt(sql).run(...values);
+    if (needsChanges) affected = statementChanges(ctx);
+  }
+  if (recordWrite) recordWrite(affected > 0);
   const updated = getById(ctx, entityName, id);
 
   // A missing/tombstoned row must not produce an after-hook.

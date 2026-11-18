@@ -84,13 +84,23 @@ export const OPERATOR_MAP: Record<WhereOperator, string> = {
 };
 
 // Quote dotted identifier paths (e.g. table.column), never SQL expressions.
+// Identifier paths are generally schema/field constants, even when bound
+// values change on every query. Cache only validated paths and cap retention
+// for callers that generate arbitrary identifiers.
+const quotedIdentifierCache = new Map<string, string>();
 export function quoteIdentifierPath(field: string): string {
   if (typeof field !== "string" || field.length === 0)
     throw new Error("WHERE field must be a non-empty identifier");
+  const cached = quotedIdentifierCache.get(field);
+  if (cached !== undefined) return cached;
   const parts = field.split(".");
   if (parts.some((part) => part.length === 0))
     throw new Error("Invalid qualified identifier");
-  return parts.map((part) => `"${part.replace(/"/g, '""')}"`).join(".");
+  const quoted = parts.map((part) => `"${part.replace(/"/g, '""')}"`).join(".");
+  if (quotedIdentifierCache.size >= 1024)
+    quotedIdentifierCache.delete(quotedIdentifierCache.keys().next().value!);
+  quotedIdentifierCache.set(field, quoted);
+  return quoted;
 }
 
 const MAX_SQL_PARAMS = 32766;

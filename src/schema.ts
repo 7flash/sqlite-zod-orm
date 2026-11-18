@@ -123,10 +123,12 @@ export function zodTypeToSqlType(zodType: ZodType): string {
 type StorageFieldPlan = {
   schema: any;
   kind: "any" | "custom" | "date" | "boolean" | "bigint" | "literal" | "json" | "plain";
+  jsonIdentity?: boolean;
 };
 type StoragePlan = {
   fields: Map<string, StorageFieldPlan>;
   anyFields: Set<string>;
+  decodedFields: [string, StorageFieldPlan][];
 };
 const storagePlans = new WeakMap<z.ZodType<any>, StoragePlan>();
 
@@ -135,6 +137,7 @@ function storagePlan(schema: z.ZodType<any>): StoragePlan {
   if (plan) return plan;
   const fields = new Map<string, StorageFieldPlan>();
   const anyFields = new Set<string>();
+  const decodedFields: [string, StorageFieldPlan][] = [];
   for (const [key, wrapped] of Object.entries(asZodObject(schema).shape)) {
     const field = unwrapField(wrapped);
     const kind: StorageFieldPlan["kind"] =
@@ -145,10 +148,15 @@ function storagePlan(schema: z.ZodType<any>): StoragePlan {
       field instanceof z.ZodBigInt ? "bigint" :
       field instanceof z.ZodLiteral ? "literal" :
       isJsonSchema(field) ? "json" : "plain";
-    fields.set(key, { schema: field, kind });
+    const entry: StorageFieldPlan = {
+      schema: field, kind,
+      jsonIdentity: kind === "json" && reviveIsIdentity(field),
+    };
+    fields.set(key, entry);
+    if (kind !== "plain") decodedFields.push([key, entry]);
     if (kind === "any") anyFields.add(key);
   }
-  plan = { fields, anyFields };
+  plan = { fields, anyFields, decodedFields };
   storagePlans.set(schema, plan);
   return plan;
 }
@@ -193,12 +201,16 @@ export function transformFromStorage(
   row: Record<string, any>,
   schema: z.ZodType<any>,
 ): Record<string, any> {
-  const transformed: Record<string, any> = {};
-  const fields = storagePlan(schema).fields;
-  for (const [key, value] of Object.entries(row)) {
-    const plan = fields.get(key);
-    const fieldSchema = plan?.schema;
-    switch (plan?.kind) {
+  // Copy all columns (including unrecognised/projection columns) exactly once.
+  // Ordinary text/numeric columns need no decoding; only visit fields whose
+  // schema can actually change the SQLite value. The copy is important: entity
+  // augmentation must never mutate a raw row shared by a caller or a batch.
+  const transformed: Record<string, any> = { ...row };
+  for (const [key, plan] of storagePlan(schema).decodedFields) {
+    if (!Object.hasOwn(row, key)) continue;
+    const value = row[key];
+    const fieldSchema = plan.schema;
+    switch (plan.kind) {
       case "any":
         if (typeof value === "string") {
           // 4.0.2+ JSON values; old unencoded strings remain unchanged.
@@ -256,15 +268,42 @@ export function transformFromStorage(
         break;
       case "json":
         if (typeof value === "string") {
-          try { transformed[key] = revive(JSON.parse(value), fieldSchema); }
+          try {
+            const decoded = JSON.parse(value);
+            transformed[key] = plan.jsonIdentity ? decoded : revive(decoded, fieldSchema);
+          }
           catch { transformed[key] = value; }
           break;
         }
         break;
     }
-    if (!Object.hasOwn(transformed, key)) transformed[key] = value;
   }
   return transformed;
+}
+
+
+/**
+ * JSON.parse already produces the desired values for nested string/number/enum
+ * schemas. The general reviver recursively copies these objects even though it
+ * changes nothing. Keep the reviver for booleans, dates, bigint, literals,
+ * unions and custom/unknown fields: legacy JSON may need their conversions.
+ */
+function reviveIsIdentity(schema: any, seen = new Set<object>()): boolean {
+  schema = unwrapField(schema);
+  if (schema instanceof z.ZodString || schema instanceof z.ZodNumber ||
+      schema instanceof z.ZodEnum || schema instanceof z.ZodAny ||
+      schema instanceof z.ZodUnknown) return true;
+  if (!schema || typeof schema !== "object" || seen.has(schema)) return false;
+  seen.add(schema);
+  try {
+    if (schema instanceof z.ZodObject)
+      return Object.values(schema.shape).every((child) => reviveIsIdentity(child, seen));
+    if (schema instanceof z.ZodArray) return reviveIsIdentity(schema.element, seen);
+    if (schema instanceof z.ZodRecord) return reviveIsIdentity(schema.valueType, seen);
+    return false;
+  } finally {
+    seen.delete(schema);
+  }
 }
 
 /** Decode JSON using its schema; an ISO-looking z.string() stays a string. */
