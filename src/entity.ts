@@ -64,7 +64,16 @@ export function attachMethods<T extends Record<string, any>>(
   return new Proxy(augmented, {
     set: (target, prop: string, value) => {
       if (storableFieldNames.has(prop) && target[prop] !== value) {
-        update(ctx, entityName, target.id, { [prop]: value });
+        const saved = update(ctx, entityName, target.id, { [prop]: value });
+        // A vetoed/tombstoned write must not change the in-memory entity.
+        // beforeUpdate can transform multiple columns, and Zod can coerce
+        // the assignment: mirror the actual persisted row, not the input.
+        if (!saved) return true;
+        for (const field of storableFieldNames) {
+          if (Object.hasOwn(saved, field)) target[field] = saved[field];
+        }
+        if (ctx.timestamps) target.updatedAt = saved.updatedAt;
+        return true;
       }
       target[prop] = value;
       return true;

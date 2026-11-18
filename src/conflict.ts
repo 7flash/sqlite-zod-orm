@@ -9,6 +9,7 @@ import type { DatabaseContext } from "./context";
 import type { AugmentedEntity, StoredColumns } from "./types";
 import { asZodObject } from "./types";
 import { transformForStorage, transformFromStorage } from "./schema";
+import { invokeHookSync } from "./crud";
 
 export type ConflictExpr = {
   sql: string;
@@ -135,7 +136,8 @@ function prepareInsertData(
 
   const hooks = ctx.hooks[entityName];
   if (hooks?.beforeInsert) {
-    const result = hooks.beforeInsert(inputData);
+    const result = invokeHookSync(ctx, entityName, "beforeInsert", () =>
+      hooks.beforeInsert!(inputData));
     if (result) inputData = result;
   }
 
@@ -183,8 +185,10 @@ export function upsertOnConflict<T extends Record<string, any>>(
     helpers: ConflictMergeHelpers<T>,
   ) => Partial<Record<keyof T & string, ConflictExpr>>,
 ): AugmentedEntity<any> {
+  return ctx._transaction(() => {
   const conflictTarget = normalizeConflictTarget(target);
   const transformed = prepareInsertData(ctx, entityName, data);
+  const existing = fetchByConflictTarget(ctx, entityName, conflictTarget, transformed);
   const columns = Object.keys(transformed);
   if (columns.length === 0)
     throw new Error(
@@ -218,25 +222,34 @@ export function upsertOnConflict<T extends Record<string, any>>(
     );
   }
 
+  if (ctx.timestamps && !Object.hasOwn(mergeMap, "updatedAt")) {
+    assignments.push(`${quoteIdent("updatedAt")} = ?`);
+    assignmentParams.push(new Date().toISOString());
+  }
+
   const insertParams = columns.map((col) => transformed[col]);
   const sql =
     `INSERT INTO ${quoteIdent(entityName)} (${columns.map(quoteIdent).join(", ")}) ` +
     `VALUES (${columns.map(() => "?").join(", ")}) ` +
-    `ON CONFLICT (${conflictTarget.map(quoteIdent).join(", ")}) DO UPDATE SET ${assignments.join(", ")}`;
+    `ON CONFLICT (${conflictTarget.map(quoteIdent).join(", ")}) DO UPDATE SET ${assignments.join(", ")}` +
+    ` RETURNING *`;
 
-  ctx._m(`SQL: INSERT ${entityName} ON CONFLICT`, () => {
-    ctx._stmt(sql).run(...insertParams, ...assignmentParams);
-  });
-
-  const entity = fetchByConflictTarget(
-    ctx,
-    entityName,
-    conflictTarget,
-    transformed,
-  );
-  if (!entity)
+  // RETURNING is the actual written row. Re-selecting by the *old* conflict
+  // key fails if the merge changes that key (or changes the row's id).
+  const written = ctx._m(`SQL: INSERT ${entityName} ON CONFLICT`, () =>
+    ctx._stmt(sql).get(...insertParams, ...assignmentParams) as Record<string, any> | null);
+  if (!written)
     throw new Error("Failed to retrieve entity after conflict upsert");
+  const entity = ctx.attachMethods(
+    entityName,
+    transformFromStorage(written, ctx.schemas[entityName]!),
+  );
+  const hookName = existing ? "afterUpdate" : "afterInsert";
+  const hook = ctx.hooks[entityName]?.[hookName];
+  if (hook) ctx._afterCommit(() => invokeHookSync(ctx, entityName, hookName, () =>
+    hook(entity)));
   return entity;
+  });
 }
 
 export function insertOnConflictDoNothing<T extends Record<string, any>>(
@@ -245,6 +258,7 @@ export function insertOnConflictDoNothing<T extends Record<string, any>>(
   data: Record<string, any>,
   target: string | string[],
 ): AugmentedEntity<any> | null {
+  return ctx._transaction(() => {
   const conflictTarget = normalizeConflictTarget(target);
   const transformed = prepareInsertData(ctx, entityName, data);
   const columns = Object.keys(transformed);
@@ -264,11 +278,20 @@ export function insertOnConflictDoNothing<T extends Record<string, any>>(
   const sql =
     `INSERT INTO ${quoteIdent(entityName)} (${columns.map(quoteIdent).join(", ")}) ` +
     `VALUES (${columns.map(() => "?").join(", ")}) ` +
-    `ON CONFLICT (${conflictTarget.map(quoteIdent).join(", ")}) DO NOTHING`;
+    `ON CONFLICT (${conflictTarget.map(quoteIdent).join(", ")}) DO NOTHING RETURNING *`;
 
-  ctx._m(`SQL: INSERT ${entityName} ON CONFLICT DO NOTHING`, () => {
-    ctx._stmt(sql).run(...columns.map((col) => transformed[col]));
+  // RETURNING has a row only on insertion. On conflict, fetch the unchanged
+  // existing row so the public API continues to return an entity either way.
+  const written = ctx._m(`SQL: INSERT ${entityName} ON CONFLICT DO NOTHING`, () =>
+    ctx._stmt(sql).get(...columns.map((col) => transformed[col])) as Record<string, any> | null);
+  const inserted = written != null;
+  const entity = written
+    ? ctx.attachMethods(entityName, transformFromStorage(written, ctx.schemas[entityName]!))
+    : fetchByConflictTarget(ctx, entityName, conflictTarget, transformed);
+  const hook = ctx.hooks[entityName]?.afterInsert;
+  if (inserted && entity && hook)
+    ctx._afterCommit(() => invokeHookSync(ctx, entityName, "afterInsert", () =>
+      hook(entity)));
+  return entity;
   });
-
-  return fetchByConflictTarget(ctx, entityName, conflictTarget, transformed);
 }

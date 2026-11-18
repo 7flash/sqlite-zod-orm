@@ -113,6 +113,8 @@ export class QueryBuilder<
       ) => { key: string; table: string; groups: Map<number, any> ; many: boolean } | null)
     | null;
   private cacheTtlMs: number | null = null;
+  private deleteExecutor: ((where: string, params: any[]) => number) | null = null;
+
 
   constructor(
     tableName: string,
@@ -879,6 +881,7 @@ export class QueryBuilder<
     // Deep-copy the IQO state
     (cloned as any).iqo = JSON.parse(JSON.stringify(this.iqo));
     (cloned as any).cacheTtlMs = this.cacheTtlMs;
+    (cloned as any).deleteExecutor = this.deleteExecutor;
     return cloned;
   }
 
@@ -901,6 +904,7 @@ export class QueryBuilder<
 
     const setClauses: string[] = [];
     const setParams: any[] = [];
+    if (Object.keys(data).length === 0) return 0;
     for (const [col, val] of Object.entries(data)) {
       setClauses.push(`"${col}" = ?`);
       if (
@@ -935,8 +939,9 @@ export class QueryBuilder<
     const whereMatch = selectSql.match(
       /WHERE (.+?)(?:\s+ORDER|\s+LIMIT|\s+GROUP|\s+HAVING|$)/s,
     );
-    const wherePart = whereMatch ? whereMatch[1] : "1=1";
+    const wherePart = whereMatch?.[1] ?? "1=1";
 
+    if (this.deleteExecutor) return this.deleteExecutor(wherePart, params);
     const deleteSql = `DELETE FROM "${this.tableName}" WHERE ${wherePart}`;
     this.executor(deleteSql, params, true);
     const result = this.executor(`SELECT changes() as c`, [], true);

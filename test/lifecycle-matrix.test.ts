@@ -27,7 +27,7 @@ type Op = { kind: string; table?: Table; id?: number; name?: string; score?: num
   fk?: Record<string, number | null>; ops?: Op[]; veto?: "false" | "throw";
   vetoTable?: Table; vetoId?: number; fail?: boolean };
 type Env = { db: any; state: State; mask: number; soft: boolean; veto: { table?: Table; id?: number; mode?: string };
-  audit: string[]; hookEvents: string[] };
+  audit: string[]; hookEvents: string[]; txDepth: number };
 const schemas = {
   orgs: z.object({ name: z.string(), score: z.number().default(0) }),
   projects: z.object({ name: z.string(), score: z.number().default(0), orgId: z.number() }),
@@ -55,7 +55,7 @@ function cascade(mask: number) {
 function make(mask: number, soft: boolean): Env {
   const env: Env = {
     db: null, state: Object.fromEntries(tables.map(t => [t, []])) as unknown as State,
-    mask, soft, veto: {}, audit: [], hookEvents: [],
+    mask, soft, veto: {}, audit: [], hookEvents: [], txDepth: 0,
   };
   const hooks = Object.fromEntries(tables.map(table => [table, {
     beforeDelete: (id: number) => {
@@ -179,8 +179,14 @@ function check(env: Env) {
       else expect(found && Object.fromEntries(Object.keys(r).map(k => [k, found[k]]))).toEqual(r);
     }
   }
-  expect((env.db.raw('SELECT event FROM "audit" ORDER BY id') as any[]).map(r => r.event))
-    .toEqual(env.audit);
+  const committedAudit = (env.db.raw('SELECT event FROM "audit" ORDER BY id') as any[])
+    .map(r => r.event);
+  // after-hooks now run after the outermost commit; audit writes from a
+  // pending savepoint/transaction cannot yet be visible.
+  if (env.txDepth > 0)
+    expect(committedAudit).toEqual(env.audit.slice(0, committedAudit.length));
+  else
+    expect(committedAudit).toEqual(env.audit);
   // Relationship accessors and eager loading must hide soft-deleted children.
   const org = env.db.orgs.get(1);
   if (org) {
@@ -204,8 +210,13 @@ function apply(env: Env, op: Op): void {
     const before = fullDump(env.db);
     try {
       env.db.transaction(() => {
-        for (const inner of op.ops ?? []) apply(env, inner);
-        if (op.fail) throw new Error("matrix-abort");
+        env.txDepth++;
+        try {
+          for (const inner of op.ops ?? []) apply(env, inner);
+          if (op.fail) throw new Error("matrix-abort");
+        } finally {
+          env.txDepth--;
+        }
       });
     } catch (e) {
       env.state = snapshot; env.audit = audit;

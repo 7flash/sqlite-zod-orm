@@ -114,7 +114,7 @@ db.users.delete(1);
 
 // Batch
 db.users.insertMany([{ name: 'Bob', email: 'b@co.com' }, { name: 'Charlie', email: 'c@co.com' }]);
-db.users.upsertMany([{ id: 1, name: 'Updated Alice' }], 'id');
+db.users.upsertMany([{ id: 1, name: 'Updated Alice' }]);
 ```
 
 Inserted and retrieved entities support proxy-based automatic persistence. Assigning a stored property writes the change to SQLite.
@@ -381,7 +381,20 @@ db.users.select().where({ role: 'spam' }).deleteAll();                    // →
 ```
 
 Additional mutation operations include `insertMany`, `upsertMany`, and
-`findOrCreate`.
+`findOrCreate`. `insertMany` and `upsertMany` return the persisted rows in
+input order. `findOrCreate(conditions, defaults)` returns `{ entity, created }`,
+where `created` is `false` when a live matching row already existed.
+`insert`, `update(id, data)`, and both `upsert` forms return a persisted row;
+an `update(id, data)` of a missing or soft-deleted row returns `null`.
+`update(data).where(...).exec()`, `delete().where(...).exec()`, and the
+`select()` batch mutations return the number of affected main-table rows,
+not the count of change-journal trigger writes. `delete(id)`, `restore(id)`,
+`seed()` and `load()` return `void`. Property assignment persists the actual
+validated/hook-transformed value.
+
+Bulk SQL updates and deletes (`update().where().exec()`,
+`delete().where().exec()` and the `select()` batch mutations) do not invoke
+per-row lifecycle hooks. Configured cascades still apply to bulk deletes.
 
 ## Cascade Deletes
 
@@ -436,9 +449,9 @@ const db = new Database(':memory:', { users: UserSchema }, {
         users: {
             beforeInsert: (data) => ({ ...data, name: data.name.trim() }),
             afterInsert: (entity) => console.log('Created:', entity.id),
-            beforeUpdate: (id, data) => data,
+            beforeUpdate: (data, id) => data,
             afterUpdate: (entity) => {},
-            beforeDelete: (id) => true,  // return false to cancel
+            beforeDelete: (id) => {},    // return false to cancel
             afterDelete: (id) => {},
             beforeRestore: (id) => {},   // softDeletes; return false to cancel
             afterRestore: (id) => {},
@@ -447,7 +460,23 @@ const db = new Database(':memory:', { users: UserSchema }, {
 });
 ```
 
-Hooks cover before/after insert, update, and delete operations.
+Hooks cover before/after insert, update, delete, and soft-delete restore.
+`beforeUpdate` receives `(data, id)`; `afterInsert` and `afterUpdate` receive
+the persisted entity; delete and restore hooks receive the row id. An
+empty update does not perform a database write or invoke `afterUpdate`.
+An absent or already-deleted row does not invoke update/delete hooks.
+
+After-hooks run after successful commit, including after the *outermost*
+`db.transaction()` commits; hooks for rolled-back transactions and savepoints
+are discarded. Before-hooks run when a write is attempted, so their external
+side effects cannot be undone if a later statement rolls back. Hook functions
+that influence writes must be synchronous.
+
+Native conflict upserts (`upsert(row, { on, merge })` and
+`upsertOnConflict`) run `beforeInsert` on the attempted input, including
+the conflict-update branch; their SQL merge does not use `beforeUpdate`.
+They dispatch `afterInsert` for an inserted row or `afterUpdate` for a
+merged row. `doNothing: true` dispatches no after-hook on a conflict.
 
 ## Transactions
 
@@ -492,6 +521,10 @@ db.load(backup);                               // restore (truncates first)
 db.load(backup, { append: true });             // restore without truncating
 db.seed({ users: [{ name: 'Test User' }] });   // additive fixture seeding
 ```
+
+`load()` and `seed()` import raw rows without running lifecycle hooks or
+generating timestamps. They cannot be called inside `db.transaction()` when
+SQLite foreign-key enforcement is enabled.
 
 Schema migration snapshots are separate from application-level JSON
 import/export. See [Migrations](#migrations) for `table_vN` snapshots

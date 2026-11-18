@@ -65,6 +65,15 @@ export interface DatabaseContext {
   _m<T>(label: string, fn: () => T): T;
 
   /**
+   * Run a synchronous write transaction/savepoint. Commit callbacks are only
+   * dispatched after the outermost ORM transaction commits.
+   */
+  _transaction<T>(callback: () => T, mode?: "immediate" | "deferred" | "exclusive"): T;
+
+  /** Dispatch an after-hook after commit, discarding it if a savepoint rolls back. */
+  _afterCommit(callback: () => void): void;
+
+  /**
    * Get a cached prepared statement. Compiles SQL once, reuses on subsequent calls.
    * Falls back to `db.query(sql)` if the statement was finalized.
    */

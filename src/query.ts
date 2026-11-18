@@ -27,6 +27,7 @@ export type {
 export { QueryBuilder } from "./builder";
 export type { QueryCacheOptions } from "./builder";
 import { QueryBuilder } from "./builder";
+import { deleteMatching } from "./crud";
 
 export {
   ColumnNode,
@@ -55,24 +56,17 @@ export function createQueryBuilder(
   const schema = ctx.schemas[entityName]!;
 
   const executor = (sql: string, params: any[], raw: boolean): any[] => {
-    // QueryBuilder.deleteAll() must tombstone parent and cascaded children.
+    // Batch updates have the same timestamp contract as update(id).
     const table = `"${entityName.replace(/"/g, '""')}"`;
-    const prefix = `DELETE FROM ${table} WHERE `;
-    if (ctx.softDeletes && sql.startsWith(prefix)) {
-      const where = sql.slice(prefix.length) + ` AND "deletedAt" IS NULL`;
-      const now = new Date().toISOString();
-      return ctx.db.transaction(() => {
-        for (const child of ctx.cascade[entityName] ?? []) {
-          const rel = ctx.relationships.find(
-            (r) => r.type === "belongs-to" && r.from === child && r.to === entityName,
-          );
-          if (!rel) continue;
-          const childTable = `"${child.replace(/"/g, '""')}"`;
-          const fk = `"${rel.foreignKey.replace(/"/g, '""')}"`;
-          ctx._stmt(`UPDATE ${childTable} SET "deletedAt" = ? WHERE ${fk} IN (SELECT id FROM ${table} WHERE ${where}) AND "deletedAt" IS NULL`).run(now, ...params);
-        }
-        return ctx._stmt(`UPDATE ${table} SET "deletedAt" = ? WHERE ${where}`).all(now, ...params);
-      }).immediate();
+    const prefix = `UPDATE ${table} SET `;
+    if (ctx.timestamps && sql.startsWith(prefix)) {
+      // Only inspect the SET clause: a WHERE predicate on updatedAt must not
+      // suppress timestamp injection for an unrelated updated field.
+      const setPart = sql.slice(prefix.length).split(/\s+WHERE\s+/i, 1)[0]!;
+      if (!/"updatedAt"\s*=/.test(setPart)) {
+        sql = sql.replace(prefix, `${prefix}"updatedAt" = ?, `);
+        params = [new Date().toISOString(), ...params];
+      }
     }
     return ctx._m(`SQL: ${sql.slice(0, 60)}`, () => {
       const rows = ctx._stmt(sql).all(...params);
@@ -224,6 +218,9 @@ export function createQueryBuilder(
     conditionResolver,
     eagerLoader,
   );
+  // Internal batch mutation delegate (not an additional public method).
+  (builder as any).deleteExecutor = (where: string, params: any[]) =>
+    deleteMatching(ctx, entityName, where, params);
   // Join targets, including explicit joins, must also be live tables.
   (builder as any).iqo.softDeleteTables = ctx.softDeletes
     ? Object.keys(ctx.schemas).filter((name) => !ctx.viewNames.has(name)) : [];

@@ -122,6 +122,36 @@ class _Database<Schemas extends SchemaMap> {
   private _stmtCache = new Map<string, ReturnType<SqliteDatabase["query"]>>();
   private _schemaRebuildLogs: string[] = [];
 
+  /** After-hooks belong to their transaction/savepoint until its commit. */
+  private _hookFrames: Array<Array<() => void>> = [];
+
+  private _afterCommit(callback: () => void): void {
+    const frame = this._hookFrames[this._hookFrames.length - 1];
+    if (frame) frame.push(callback);
+    else callback();
+  }
+
+  private _transaction<T>(
+    callback: () => T,
+    mode: "immediate" | "deferred" | "exclusive" = "immediate",
+  ): T {
+    const callbacks: Array<() => void> = [];
+    const result = this.db.transaction(() => {
+      this._hookFrames.push(callbacks);
+      try {
+        return callback();
+      } finally {
+        this._hookFrames.pop();
+      }
+    })[mode]();
+    // A successful savepoint transfers its hooks to the containing
+    // transaction; a failed one never reaches this code.
+    const parent = this._hookFrames[this._hookFrames.length - 1];
+    if (parent) parent.push(...callbacks);
+    else for (const hook of callbacks) hook();
+    return result;
+  }
+
   /** Get or create a cached prepared statement. */
   private _stmt(sql: string): ReturnType<SqliteDatabase["query"]> {
     let stmt = this._stmtCache.get(sql);
@@ -253,6 +283,9 @@ class _Database<Schemas extends SchemaMap> {
       cascade: options.cascade ?? {},
       _m: <T>(label: string, fn: () => T): T => this._m(label, fn),
       _stmt: (sql: string) => this._stmt(sql),
+      _transaction: <T>(callback: () => T, mode?: "immediate" | "deferred" | "exclusive") =>
+        this._transaction(callback, mode),
+      _afterCommit: (callback: () => void) => this._afterCommit(callback),
     };
 
     // Foreign keys must be disabled outside the transaction for safe table
@@ -1199,11 +1232,10 @@ class _Database<Schemas extends SchemaMap> {
     options: TransactionOptions = {},
   ): T {
     return this._m("transaction", () =>
-      this.db.transaction(() => {
+      this._transaction(() => {
         const result = callback();
         // SQLite commits when the callback returns, not when a Promise
-        // settles: awaited writes would run outside the transaction. Throwing
-        // here rolls the transaction back.
+        // settles: awaited writes would run outside the transaction.
         if (result && typeof (result as any).then === "function") {
           void Promise.resolve(result).catch(() => undefined);
           throw new TypeError(
@@ -1211,7 +1243,7 @@ class _Database<Schemas extends SchemaMap> {
           );
         }
         return result;
-      })[options.mode ?? "immediate"](),
+      }, options.mode ?? "immediate"),
     );
   }
 

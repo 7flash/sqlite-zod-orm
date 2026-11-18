@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.2.0 (2026-11-18)
+
+Found by a write-results matrix (`test/write-results-matrix.test.ts`, 71 cases: every write API under reactive x softDeletes x timestamps x hooks x inside/outside/rolled-back transactions, each return value compared with a direct SQL count and every hook call recorded; 66 fail on 4.1.0).
+
+### Changed (check your app if it uses hooks or cascade)
+- After-hooks (`afterInsert`/`afterUpdate`/`afterDelete`/`afterRestore`) inside `transaction()` now run after the outermost commit, and never for work that was rolled back. Before, they ran immediately, also for rows that were then rolled back.
+- `delete().where().exec()` and `select().deleteAll()` follow `cascade` like `delete(id)` does (they left children behind). They return the number of matched rows, not the last child statement's count.
+- Native conflict upserts (`upsert(row, { on, merge })`) fire one `afterInsert` or `afterUpdate` after commit; they fired none.
+- Bulk updates, `updateAll`, `increment` and `decrement` set `updatedAt` when timestamps are on; `update(id, {})` writes nothing and fires no hook.
+
+### Fixed
+- Assigning `entity.field = x` leaves the entity showing what was stored (after hooks and validation), not the raw assignment.
+- `findOrCreate` takes the write lock before looking, so two processes can't both create; conditions win over defaults with the same key.
+- `upsertMany` fires no after-hooks for earlier rows when a later row aborts the batch; `upsert` treats id `0` as an id.
+- README: lifecycle hook arguments are `(data, id)`, and which calls run hooks.
+
+Checked with the real-run tools: upgrade from 3.34.0 12/12; 9 apps type-check with no new errors; in C:/Code only mements--kk combines `cascade` with bulk deletes, and its `deleteAll()` calls are on tables that have no cascade.
+
 ## 4.1.0 (2026-11-18)
 
 The types now say what the code returns. Found by a type matrix (`test/types-matrix.test.ts`: every public API, each type assertion paired with a run-time check of the same fact; 63 of its assertions fail to compile on 4.0.11).

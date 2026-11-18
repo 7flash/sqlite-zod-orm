@@ -23,7 +23,7 @@ function deletionTimestamp(): string {
 const activeHooks = new WeakMap<object, Set<string>>();
 
 /** Lifecycle hooks are synchronous. Reject promises and same-hook re-entry. */
-function invokeHookSync<T>(
+export function invokeHookSync<T>(
   ctx: DatabaseContext,
   entityName: string,
   hookName: string,
@@ -176,8 +176,8 @@ function executeInsert<T extends Record<string, any>>(
 
   // afterInsert hook
   if (!deferAfterHook && hooks?.afterInsert)
-    invokeHookSync(ctx, entityName, "afterInsert", () =>
-      hooks.afterInsert!(newEntity));
+    ctx._afterCommit(() => invokeHookSync(ctx, entityName, "afterInsert", () =>
+      hooks.afterInsert!(newEntity)));
 
   return newEntity;
 }
@@ -196,6 +196,7 @@ export function update<T extends Record<string, any>>(
   id: number,
   data: Partial<Omit<T, "id">>,
   deferAfterHook = false,
+  recordWrite?: (wrote: boolean) => void,
 ): AugmentedEntity<any> | null {
   const schema = ctx.schemas[entityName]!;
   let inputData = { ...data } as Record<string, any>;
@@ -212,8 +213,11 @@ export function update<T extends Record<string, any>>(
 
   const validatedData = parsePartial(schema, inputData);
   const transformed = transformForStorage(validatedData, schema);
-  if (Object.keys(transformed).length === 0 && !ctx.timestamps)
+  // An empty update is a read, not a physical write or an afterUpdate.
+  if (Object.keys(transformed).length === 0) {
+    recordWrite?.(false);
     return getById(ctx, entityName, id);
+  }
 
   // Auto-update timestamp
   if (ctx.timestamps) {
@@ -224,16 +228,18 @@ export function update<T extends Record<string, any>>(
     .map((key) => `${qi(key)} = ?`)
     .join(", ");
   const sql = `UPDATE ${qi(entityName)} SET ${setClause} ${visibleWhere(ctx, entityName, "WHERE id = ?")}`;
-  ctx._m(`SQL: UPDATE ${entityName} SET ...`, () => {
+  const affected = ctx._m(`SQL: UPDATE ${entityName} SET ...`, () => {
     ctx._stmt(sql).run(...Object.values(transformed), id);
+    return statementChanges(ctx);
   });
 
+  recordWrite?.(affected > 0);
   const updated = getById(ctx, entityName, id);
 
-  // afterUpdate hook
-  if (!deferAfterHook && hooks?.afterUpdate && updated)
-    invokeHookSync(ctx, entityName, "afterUpdate", () =>
-      hooks.afterUpdate!(updated));
+  // A missing/tombstoned row must not produce an after-hook.
+  if (!deferAfterHook && affected > 0 && hooks?.afterUpdate && updated)
+    ctx._afterCommit(() => invokeHookSync(ctx, entityName, "afterUpdate", () =>
+      hooks.afterUpdate!(updated)));
 
   return updated;
 }
@@ -258,6 +264,7 @@ export function updateWhere(
   const validatedData = parsePartial(schema, data);
   const transformed = transformForStorage(validatedData, schema);
   if (Object.keys(transformed).length === 0) return 0;
+  if (ctx.timestamps) transformed.updatedAt = new Date().toISOString();
 
   const { clause, values: whereValues } = ctx.buildWhereClause(conditions);
   if (!clause)
@@ -297,8 +304,8 @@ export function upsert<T extends Record<string, any>>(
   // Reserve the write lock BEFORE reading. A deferred transaction permits
   // two connections to both observe a missing row and race to insert it.
   let restored: [string, number][] = [];
-  const txn = ctx.db.transaction(() => {
-    const hasId = data?.id && typeof data.id === "number";
+  const txn = () => {
+    const hasId = typeof data?.id === "number";
     const existing = hasId
       ? getById(ctx, entityName, data.id, true)
       : Object.keys(conditions ?? {}).length > 0
@@ -316,15 +323,17 @@ export function upsert<T extends Record<string, any>>(
       }
       const updateData = { ...data };
       delete updateData.id;
+      let wrote = false;
       const entity = update(
         ctx,
         entityName,
         existing.id,
         updateData,
         true,
+        (changed) => { wrote = changed; },
       );
       if (!entity) throw new Error("Failed to retrieve entity after upsert");
-      return { entity, created: false };
+      return { entity, created: false, wrote };
     }
 
     const insertData = { ...(conditions ?? {}), ...(data ?? {}) };
@@ -332,20 +341,21 @@ export function upsert<T extends Record<string, any>>(
     return {
       entity: executeInsert(ctx, entityName, insertData, true),
       created: true,
+      wrote: true,
     };
-  });
+  };
 
-  const result = txn.immediate();
+  const result = ctx._transaction(txn);
   runAfterRestore(ctx, restored);
 
   // After-hooks must describe committed changes, never rolled-back ones.
   const hooks = ctx.hooks[entityName];
   if (result.created && hooks?.afterInsert)
-    invokeHookSync(ctx, entityName, "afterInsert", () =>
-      hooks.afterInsert!(result.entity));
-  else if (!result.created && hooks?.afterUpdate)
-    invokeHookSync(ctx, entityName, "afterUpdate", () =>
-      hooks.afterUpdate!(result.entity));
+    ctx._afterCommit(() => invokeHookSync(ctx, entityName, "afterInsert", () =>
+      hooks.afterInsert!(result.entity)));
+  else if (!result.created && result.wrote && hooks?.afterUpdate)
+    ctx._afterCommit(() => invokeHookSync(ctx, entityName, "afterUpdate", () =>
+      hooks.afterUpdate!(result.entity)));
 
   return result.entity;
 }
@@ -357,11 +367,16 @@ export function findOrCreate<T extends Record<string, any>>(
   conditions: Record<string, any>,
   defaults: Record<string, any> = {},
 ): { entity: AugmentedEntity<any>; created: boolean } {
-  const existing = getOne(ctx, entityName, conditions);
-  if (existing) return { entity: existing, created: false };
-  const data = { ...conditions, ...defaults };
-  delete (data as any).id;
-  return { entity: executeInsert(ctx, entityName, data), created: true };
+  // The existence check and insert must hold the same write reservation.
+  return ctx._transaction(() => {
+    const existing = getOne(ctx, entityName, conditions);
+    if (existing) return { entity: existing, created: false };
+    // Conditions must remain true of the newly created row, even if defaults
+    // happen to include the same key.
+    const data = { ...defaults, ...conditions };
+    delete (data as any).id;
+    return { entity: executeInsert(ctx, entityName, data), created: true };
+  });
 }
 
 export function deleteEntity(
@@ -405,19 +420,20 @@ export function deleteEntity(
     const result = ctx.softDeletes
       ? ctx._stmt(`UPDATE ${qi(table)} SET "deletedAt" = ? WHERE id = ? AND "deletedAt" IS NULL`).run(now, rowId)
       : ctx._stmt(`DELETE FROM ${qi(table)} WHERE id = ?`).run(rowId);
-    if (result.changes > 0) deleted.push([table, rowId]);
+    if (statementChanges(ctx) > 0) deleted.push([table, rowId]);
     return true;
   };
 
-  ctx.db.transaction(() => {
+  ctx._transaction(() => {
     visit(entityName, id, true);
-  }).immediate();
+  });
 
   // After-hooks describe committed deletes, children first.
   for (const [table, rowId] of deleted) {
     const hooks = ctx.hooks[table];
     if (hooks?.afterDelete)
-      invokeHookSync(ctx, table, "afterDelete", () => hooks.afterDelete!(rowId));
+      ctx._afterCommit(() => invokeHookSync(ctx, table, "afterDelete", () =>
+        hooks.afterDelete!(rowId)));
   }
 }
 
@@ -430,7 +446,8 @@ export function restoreEntity(ctx: DatabaseContext, entityName: string, id: numb
 function runAfterRestore(ctx: DatabaseContext, rows: [string, number][]): void {
   for (const [table, rowId] of rows) {
     const hook = ctx.hooks[table]?.afterRestore;
-    if (hook) invokeHookSync(ctx, table, "afterRestore", () => hook(rowId));
+    if (hook) ctx._afterCommit(() =>
+      invokeHookSync(ctx, table, "afterRestore", () => hook(rowId)));
   }
 }
 
@@ -438,7 +455,7 @@ function runAfterRestore(ctx: DatabaseContext, rows: [string, number][]): void {
 function restoreRows(ctx: DatabaseContext, entityName: string, id: number): [string, number][] {
   const rows: [string, number][] = [];
   const seen = new Set<string>();
-  ctx.db.transaction(() => {
+  ctx._transaction(() => {
     const root = ctx._stmt(`SELECT "deletedAt" FROM ${qi(entityName)} WHERE id = ?`)
       .get(id) as { deletedAt: string | null } | null;
     if (!root) throw new Error(`Cannot restore ${entityName}(${id}): row not found`);
@@ -489,16 +506,70 @@ function restoreRows(ctx: DatabaseContext, entityName: string, id: number): [str
         const result = ctx._stmt(
           `UPDATE ${qi(table)} SET "deletedAt" = NULL WHERE id = ? AND "deletedAt" = ?`,
         ).run(rowId, stamp);
-        // changes also counts rows written by the change-tracking trigger.
-        if (result.changes === 0) throw new Error(`Restore lost row ${table}(${rowId})`);
+        if (statementChanges(ctx) === 0) throw new Error(`Restore lost row ${table}(${rowId})`);
       } catch (e) {
         if (/UNIQUE constraint failed|SQLITE_CONSTRAINT_UNIQUE/i.test(String(e)))
           throw new Error(`Cannot restore ${table}(${rowId}): unique constraint conflict`, { cause: e });
         throw e;
       }
     }
-  }).immediate();
+  });
   return rows.reverse();
+}
+
+/**
+ * Bulk deletes are SQL writes, not per-entity lifecycle operations. Visit
+ * configured descendants once, children first, and count only root rows.
+ * This also prevents select().deleteAll() from reporting the final child's
+ * changes() instead of the number of selected parent rows.
+ */
+export function deleteMatching(
+  ctx: DatabaseContext,
+  entityName: string,
+  where: string,
+  params: any[],
+): number {
+  if (ctx.viewNames.has(entityName))
+    throw new Error(`Cannot delete from read-only view "${entityName}"`);
+  return ctx._transaction(() => {
+    const visible = ctx.softDeletes
+      ? `${where ? `(${where}) AND ` : ""}"deletedAt" IS NULL`
+      : (where || "1=1");
+    const roots = ctx._stmt(`SELECT id FROM ${qi(entityName)} WHERE ${visible}`)
+      .all(...params) as { id: number }[];
+    const visited = new Set<string>();
+    const selectedRoots = new Set(roots.map((row) => row.id));
+    const stamp = ctx.softDeletes ? deletionTimestamp() : "";
+    let count = 0;
+
+    const visit = (table: string, id: number): void => {
+      const key = `${table}:${id}`;
+      if (visited.has(key)) return;
+      visited.add(key);
+      const live = ctx._stmt(
+        `SELECT id FROM ${qi(table)} WHERE id = ?${ctx.softDeletes ? ' AND "deletedAt" IS NULL' : ""}`,
+      ).get(id);
+      if (!live) return;
+      for (const child of ctx.cascade[table] ?? [])
+        for (const rel of ctx.relationships.filter(
+          (r) => r.type === "belongs-to" && r.from === child && r.to === table,
+        )) {
+          const rows = ctx._stmt(
+            `SELECT id FROM ${qi(child)} WHERE ${qi(rel.foreignKey)} = ?${ctx.softDeletes ? ' AND "deletedAt" IS NULL' : ""}`,
+          ).all(id) as { id: number }[];
+          for (const row of rows) visit(child, row.id);
+        }
+
+      if (ctx.softDeletes)
+        ctx._stmt(`UPDATE ${qi(table)} SET "deletedAt" = ? WHERE id = ? AND "deletedAt" IS NULL`).run(stamp, id);
+      else
+        ctx._stmt(`DELETE FROM ${qi(table)} WHERE id = ?`).run(id);
+      if (table === entityName && selectedRoots.has(id))
+        count += statementChanges(ctx);
+    };
+    for (const row of roots) visit(entityName, row.id);
+    return count;
+  });
 }
 
 /** Bulk SQL delete: deliberately bypasses per-row beforeDelete/afterDelete hooks. */
@@ -510,6 +581,9 @@ export function deleteWhere(
   const { clause, values } = ctx.buildWhereClause(conditions);
   if (!clause)
     throw new Error("delete().where() requires at least one condition");
+
+  if ((ctx.cascade[entityName] ?? []).length)
+    return deleteMatching(ctx, entityName, clause.slice("WHERE ".length), values);
 
   if (ctx.softDeletes) {
     // Soft delete: set deletedAt instead of removing rows
@@ -557,7 +631,7 @@ export function insertMany<T extends Record<string, any>>(
   const zodSchema = asZodObject(schema).passthrough();
   const hooks = ctx.hooks[entityName];
 
-  const txn = ctx.db.transaction(() => {
+  const txn = () => {
     const ids: number[] = [];
     for (let data of rows) {
       let inputData = { ...data } as Record<string, any>;
@@ -588,10 +662,10 @@ export function insertMany<T extends Record<string, any>>(
       ids.push(result.lastInsertRowid as number);
     }
     return ids;
-  });
+  };
 
   // Acquire the write lock before running hooks or inserting any rows.
-  const ids = txn.immediate();
+  const ids = ctx._transaction(txn);
   const entities = ids
     .map((id: number) => getById(ctx, entityName, id)!)
     .filter(Boolean);
@@ -599,7 +673,8 @@ export function insertMany<T extends Record<string, any>>(
   // afterInsert hooks
   if (hooks?.afterInsert) {
     for (const entity of entities)
-      invokeHookSync(ctx, entityName, "afterInsert", () => hooks.afterInsert!(entity));
+      ctx._afterCommit(() =>
+        invokeHookSync(ctx, entityName, "afterInsert", () => hooks.afterInsert!(entity)));
   }
 
   return entities;
@@ -614,15 +689,13 @@ export function upsertMany<T extends Record<string, any>>(
 ): AugmentedEntity<any>[] {
   if (rows.length === 0) return [];
 
-  const txn = ctx.db.transaction(() => {
+  return ctx._transaction(() => {
     const results: AugmentedEntity<any>[] = [];
     for (const data of rows) {
       results.push(upsert(ctx, entityName, data, conditions));
     }
     return results;
   });
-
-  return txn.immediate();
 }
 
 /**
