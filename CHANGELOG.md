@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.0.10 (2026-11-18)
+
+Found by a change-feed matrix (`test/change-feed-matrix.test.ts`: two ORM connections and a bare `bun:sqlite` connection on one file, rollbacks and savepoints, bulk and raw writes, cascades, hooks, migrations, soft deletes, and 4,096 seeded write sequences, each checked for the exact events `.on()` delivers):
+
+- Fixed: with two `Database` objects (or two processes) on one file, the first to poll deleted the change records, so `.on()` listeners on the other never fired. Records are now kept for the newest 10,000 changes; a reader that falls further behind misses the oldest ones. Opening a database also trims the journal to that window, so `_changes` no longer grows without limit when nothing listens.
+- Fixed: an insert or update whose row was deleted before the next poll fired no event. The listener now gets `{ id }` when the row is gone.
+- Fixed: soft-deleting or restoring a row fired no `update` event (the row was hidden from the lookup). The listener now gets the row with its `deletedAt`.
+- Fixed: a listener added after a write could receive that earlier write. Listeners now see only writes made after they subscribe.
+- Fixed: a table name containing `'` or `"` broke the change triggers at startup.
+
 ## 4.0.9 (2026-11-18)
 
 Found by a relations matrix (`test/relations-matrix.test.ts`: 180 users, 650 posts, 2,100 comments, tags through a link table, two FKs to one table, a self-reference, nullable, dangling and custom-named FKs, with softDeletes off and on; every accessor, `.with()` and join compared with hand-written SQL):

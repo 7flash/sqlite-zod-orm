@@ -72,7 +72,17 @@ type Listener = {
   table: string;
   event: ChangeEvent;
   callback: (row: any) => void | Promise<void>;
+  /** Change id at subscription time; do not replay earlier writes. */
+  since: number;
 };
+
+/**
+ * Change-journal rows kept behind the newest one. Several connections (or
+ * processes) can read one file, and none knows how far the others got, so the
+ * journal is trimmed only beyond this window: a reader that falls more than
+ * this many writes behind misses the oldest ones.
+ */
+const CHANGE_JOURNAL_KEEP = 10_000;
 
 /** Most prepared statements kept per database (least recently used are dropped). */
 const STATEMENT_CACHE_SIZE = 500;
@@ -896,25 +906,27 @@ class _Database<Schemas extends SchemaMap> {
         )`);
 
     for (const entityName of Object.keys(this.schemas)) {
+      const table = `"${this.escapeIdentifier(entityName)}"`;
+      const literal = entityName.replace(/'/g, "''");
       // INSERT trigger — logs NEW.id
-      this.db.run(`CREATE TRIGGER IF NOT EXISTS "_trg_${entityName}_insert"
-                AFTER INSERT ON "${entityName}"
+      this.db.run(`CREATE TRIGGER IF NOT EXISTS "${this.escapeIdentifier(`_trg_${entityName}_insert`)}"
+                AFTER INSERT ON ${table}
                 BEGIN
-                    INSERT INTO "_changes" (tbl, op, row_id) VALUES ('${entityName}', 'insert', NEW.id);
+                    INSERT INTO "_changes" (tbl, op, row_id) VALUES ('${literal}', 'insert', NEW.id);
                 END`);
 
       // UPDATE trigger — logs NEW.id (post-update row)
-      this.db.run(`CREATE TRIGGER IF NOT EXISTS "_trg_${entityName}_update"
-                AFTER UPDATE ON "${entityName}"
+      this.db.run(`CREATE TRIGGER IF NOT EXISTS "${this.escapeIdentifier(`_trg_${entityName}_update`)}"
+                AFTER UPDATE ON ${table}
                 BEGIN
-                    INSERT INTO "_changes" (tbl, op, row_id) VALUES ('${entityName}', 'update', NEW.id);
+                    INSERT INTO "_changes" (tbl, op, row_id) VALUES ('${literal}', 'update', NEW.id);
                 END`);
 
       // DELETE trigger — logs OLD.id (row that was deleted)
-      this.db.run(`CREATE TRIGGER IF NOT EXISTS "_trg_${entityName}_delete"
-                AFTER DELETE ON "${entityName}"
+      this.db.run(`CREATE TRIGGER IF NOT EXISTS "${this.escapeIdentifier(`_trg_${entityName}_delete`)}"
+                AFTER DELETE ON ${table}
                 BEGIN
-                    INSERT INTO "_changes" (tbl, op, row_id) VALUES ('${entityName}', 'delete', OLD.id);
+                    INSERT INTO "_changes" (tbl, op, row_id) VALUES ('${literal}', 'delete', OLD.id);
                 END`);
     }
 
@@ -923,6 +935,13 @@ class _Database<Schemas extends SchemaMap> {
       .query('SELECT MAX(id) as maxId FROM "_changes"')
       .get() as any;
     this._changeWatermark = row?.maxId ?? 0;
+    this._trimChangeJournal(this._changeWatermark);
+  }
+
+  /** Drop journal rows more than CHANGE_JOURNAL_KEEP behind `head`. */
+  private _trimChangeJournal(head: number): void {
+    if (head > CHANGE_JOURNAL_KEEP)
+      this._stmt('DELETE FROM "_changes" WHERE id <= ?').run(head - CHANGE_JOURNAL_KEEP);
   }
 
   private indexSql(table: string, cols: string[], unique: boolean): string {
@@ -1073,7 +1092,10 @@ class _Database<Schemas extends SchemaMap> {
       );
     }
 
-    const listener: Listener = { table, event, callback };
+    // A newly installed listener only receives writes made after registration,
+    // including when another listener is already processing a backlog.
+    const head = this._stmt('SELECT MAX(id) AS m FROM "_changes"').get() as { m: number | null } | null;
+    const listener: Listener = { table, event, callback, since: head?.m ?? 0 };
     this._listeners.push(listener);
     this._startPolling();
 
@@ -1137,14 +1159,16 @@ class _Database<Schemas extends SchemaMap> {
 
     for (const change of changes) {
       const listeners = this._listeners.filter(
-        (l) => l.table === change.tbl && l.event === change.op,
+        (l) => l.table === change.tbl && l.event === change.op && change.id > l.since,
       );
 
       if (listeners.length > 0) {
         const payload =
           change.op === "delete"
-            ? { id: change.row_id } // the row is gone: pass just the id
-            : getById(this._ctx, change.tbl, change.row_id); // re-fetch the current row
+            ? { id: change.row_id }
+            // A later delete (or a soft delete) must not erase an earlier event.
+            // No historical payload is stored, so retain at least the row id.
+            : (getById(this._ctx, change.tbl, change.row_id, true) ?? { id: change.row_id });
         if (payload) {
           for (const l of listeners) {
             // A listener removed by an earlier listener in this dispatch is skipped.
@@ -1157,10 +1181,10 @@ class _Database<Schemas extends SchemaMap> {
       this._changeWatermark = change.id;
     }
 
-    // Clean up consumed changes
-    this._stmt('DELETE FROM "_changes" WHERE id <= ?').run(
-      this._changeWatermark,
-    );
+    // Other connections may not have read these rows yet, and their
+    // watermarks are unknown here, so keep a fixed window instead of pruning
+    // everything this connection consumed.
+    this._trimChangeJournal(this._changeWatermark);
   }
 
   // =========================================================================
