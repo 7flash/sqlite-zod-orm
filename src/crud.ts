@@ -67,6 +67,29 @@ export function invokeHookSync<T>(
   }
 }
 
+// Zod's passthrough()/partial() allocate new parser graphs. Schemas are fixed
+// after database construction; reuse these parser variants across hot writes.
+const insertParsers = new WeakMap<object, any>();
+const partialParsers = new WeakMap<object, any>();
+
+function insertParser(schema: object): any {
+  let parser = insertParsers.get(schema);
+  if (!parser) {
+    parser = asZodObject(schema as any).passthrough();
+    insertParsers.set(schema, parser);
+  }
+  return parser;
+}
+
+function partialParser(schema: object): any {
+  let parser = partialParsers.get(schema);
+  if (!parser) {
+    parser = asZodObject(schema as any).partial();
+    partialParsers.set(schema, parser);
+  }
+  return parser;
+}
+
 // ---------------------------------------------------------------------------
 // Read helpers
 // ---------------------------------------------------------------------------
@@ -148,7 +171,7 @@ function executeInsert<T extends Record<string, any>>(
     if (result) inputData = result;
   }
 
-  const validatedData = asZodObject(schema).passthrough().parse(inputData);
+  const validatedData = insertParser(schema).parse(inputData);
   const transformed = transformForStorage(validatedData, schema);
 
   // Auto-inject timestamps
@@ -628,11 +651,14 @@ export function insertMany<T extends Record<string, any>>(
 ): AugmentedEntity<any>[] {
   if (rows.length === 0) return [];
   const schema = ctx.schemas[entityName]!;
-  const zodSchema = asZodObject(schema).passthrough();
+  const zodSchema = insertParser(schema);
   const hooks = ctx.hooks[entityName];
 
   const txn = () => {
     const ids: number[] = [];
+    // A row hook may change which columns are present. Cache by actual SQL,
+    // not just the table/schema; identical shapes use one statement lookup.
+    const statements = new Map<string, ReturnType<DatabaseContext["_stmt"]>>();
     for (let data of rows) {
       let inputData = { ...data } as Record<string, any>;
 
@@ -658,7 +684,12 @@ export function insertMany<T extends Record<string, any>>(
         columns.length === 0
           ? `INSERT INTO ${qi(entityName)} DEFAULT VALUES`
           : `INSERT INTO ${qi(entityName)} (${quotedCols.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`;
-      const result = ctx._stmt(sql).run(...Object.values(transformed));
+      let stmt = statements.get(sql);
+      if (!stmt) {
+        stmt = ctx._stmt(sql);
+        statements.set(sql, stmt);
+      }
+      const result = stmt.run(...Object.values(transformed));
       ids.push(result.lastInsertRowid as number);
     }
     return ids;
@@ -666,9 +697,31 @@ export function insertMany<T extends Record<string, any>>(
 
   // Acquire the write lock before running hooks or inserting any rows.
   const ids = ctx._transaction(txn);
-  const entities = ids
-    .map((id: number) => getById(ctx, entityName, id)!)
-    .filter(Boolean);
+  // A getById for every inserted row used one additional SELECT/statement
+  // lookup per row. Hydrate in bounded IN batches after the commit, then
+  // restore input order (including the original skip-missing behaviour).
+  const entities: AugmentedEntity<any>[] = [];
+  const rawById = new Map<number, Record<string, any>>();
+  const seen = new Set<number>();
+  const uniqueIds = ids.filter(id => {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+  const quotedTable = qi(entityName);
+  for (let start = 0; start < uniqueIds.length; start += 900) {
+    const batch = uniqueIds.slice(start, start + 900);
+    const sql = `SELECT * FROM ${quotedTable} ${visibleWhere(ctx, entityName,
+      `WHERE id IN (${batch.map(() => "?").join(", ")})`)}`;
+    const found = ctx._stmt(sql).all(...batch) as Record<string, any>[];
+    for (const row of found) rawById.set(row.id, row);
+  }
+  // Hydration itself still occurs in input order, including a distinct
+  // entity/proxy for any repeated ID, as the former getById loop did.
+  for (const id of ids) {
+    const row = rawById.get(id);
+    if (row) entities.push(ctx.attachMethods(entityName, transformFromStorage(row, schema)));
+  }
 
   // afterInsert hooks
   if (hooks?.afterInsert) {
@@ -704,7 +757,7 @@ export function upsertMany<T extends Record<string, any>>(
  * data, so only the fields the caller passed are kept.
  */
 function parsePartial(schema: any, data: Record<string, any>): Record<string, any> {
-  const parsed = asZodObject(schema).partial().parse(data) as Record<string, any>;
+  const parsed = partialParser(schema).parse(data) as Record<string, any>;
   const out: Record<string, any> = {};
   for (const key of Object.keys(parsed)) {
     if (Object.hasOwn(data, key)) out[key] = parsed[key];

@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.2.1 (2026-11-18)
+
+Faster, same behaviour (all 7,603 tests pass). Measured with the new `bench/overhead.ts` (every operation against hand-written bun:sqlite at 1k and 10k rows, reactive/timestamps/softDeletes on and off; the ORM/raw ratio is compared so machine load cancels out), two runs before and after on one machine:
+
+| Operation | Faster by |
+|---|---|
+| `update(id)` | 5.6x |
+| entity property assignment | 5.3x |
+| `upsert` | 3.9x |
+| `insert` | 3.8x |
+| `select().where()`, `get(id)`, `.with()` | 2.2-2.5x |
+| bulk update | 2.4x |
+| `insertMany` | 1.7x |
+| `count`, `pluck`, `delete` | unchanged |
+
+- Zod read/write plans and parsers are built once per schema instead of per row or per call.
+- Entities reuse per-schema field and relation lists.
+- `insertMany` prepares one statement per row shape and reads rows back in one batch.
+- `.with()` on a forward relation loads targets straight from the already-hydrated rows' keys.
+- `bench/overhead.ts --check bench/baseline.json` fails when any ORM/raw ratio gets more than 15% worse; `test/perf-guards.test.ts` checks query counts and statement reuse.
+
 ## 4.2.0 (2026-11-18)
 
 Found by a write-results matrix (`test/write-results-matrix.test.ts`, 71 cases: every write API under reactive x softDeletes x timestamps x hooks x inside/outside/rolled-back transactions, each return value compared with a direct SQL count and every hook call recorded; 66 fail on 4.1.0).

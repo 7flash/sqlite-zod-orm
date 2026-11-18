@@ -110,6 +110,7 @@ export class QueryBuilder<
         parentTable: string,
         relation: string,
         parentIds: number[],
+        sourceRows?: any[],
       ) => { key: string; table: string; groups: Map<number, any> ; many: boolean } | null)
     | null;
   private cacheTtlMs: number | null = null;
@@ -133,6 +134,7 @@ export class QueryBuilder<
           parentTable: string,
           relation: string,
           parentIds: number[],
+        sourceRows?: any[],
         ) => { key: string; table: string; groups: Map<number, any> ; many: boolean } | null)
       | null,
   ) {
@@ -505,7 +507,9 @@ export class QueryBuilder<
       const ids = [...new Set(rows.map((row) => row.id).filter((id) => typeof id === "number"))];
       if (ids.length === 0) return;
       for (const [relation, children] of node) {
-        const loaded = this.eagerLoader!(table, relation, ids);
+        const loaded = this.eagerLoader!(
+          table, relation, ids, this.iqo.raw ? undefined : rows,
+        );
         if (!loaded) continue;
         const next: any[] = [];
         for (const row of rows) {

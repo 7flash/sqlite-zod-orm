@@ -9,6 +9,36 @@ import { getStorableFields, transformForStorage } from "./schema";
 import type { DatabaseContext } from "./context";
 import { getById, findMany, update, deleteEntity } from "./crud";
 
+// Per-database navigation descriptors and per-schema writable keys do not
+// change as rows are hydrated. Avoid scanning every relationship and rebuilding
+// a Set on each read; the proxy itself remains mandatory for auto-persist.
+const navigationCache = new WeakMap<DatabaseContext, Map<string, Relationship[]>>();
+const writableCache = new WeakMap<object, Set<string>>();
+
+function navigationFor(ctx: DatabaseContext, table: string): Relationship[] {
+  let byTable = navigationCache.get(ctx);
+  if (!byTable) {
+    byTable = new Map();
+    for (const relation of ctx.relationships) {
+      let list = byTable.get(relation.from);
+      if (!list) byTable.set(relation.from, list = []);
+      list.push(relation);
+    }
+    navigationCache.set(ctx, byTable);
+  }
+  return byTable.get(table) ?? [];
+}
+
+function writableFor(ctx: DatabaseContext, table: string): Set<string> {
+  const schema = ctx.schemas[table]!;
+  let keys = writableCache.get(schema);
+  if (!keys) {
+    keys = new Set(getStorableFields(schema).map(field => field.name));
+    writableCache.set(schema, keys);
+  }
+  return keys;
+}
+
 /**
  * Augment a raw entity with:
  * - .update(data) → persist partial update
@@ -29,7 +59,7 @@ export function attachMethods<T extends Record<string, any>>(
   }
 
   // Attach lazy relationship navigation
-  for (const rel of ctx.relationships) {
+  for (const rel of navigationFor(ctx, entityName)) {
     if (rel.from === entityName && rel.type === "belongs-to") {
       // book.author() → lazy load parent via author_id FK
       augmented[rel.relationshipField] = () => {
@@ -58,9 +88,7 @@ export function attachMethods<T extends Record<string, any>>(
   // Auto-persist proxy: setting a field auto-updates the DB row
   if (isView) return augmented;
 
-  const storableFieldNames = new Set(
-    getStorableFields(ctx.schemas[entityName]!).map((f) => f.name),
-  );
+  const storableFieldNames = writableFor(ctx, entityName);
   return new Proxy(augmented, {
     set: (target, prop: string, value) => {
       if (storableFieldNames.has(prop) && target[prop] !== value) {

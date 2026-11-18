@@ -145,10 +145,13 @@ export function createQueryBuilder(
     return resolved;
   };
 
+  // SQLite builds can still use the older 999-host-parameter limit.
+  const MAX_RELATION_IDS = 900;
   const eagerLoader = (
     parentTable: string,
     relation: string,
     parentIds: number[],
+    sourceRows?: any[],
   ): { key: string; table: string; groups: Map<number, any>; many: boolean } | null => {
     const hasMany = ctx.relationships.find(
       (r) =>
@@ -158,21 +161,27 @@ export function createQueryBuilder(
     );
     if (hasMany) {
       const fk = hasMany.foreignKey;
-      const placeholders = parentIds.map(() => "?").join(", ");
-      const childRows = ctx
-        ._stmt(`SELECT * FROM "${hasMany.to.replace(/"/g, '""')}" WHERE "${fk.replace(/"/g, '""')}" IN (${placeholders})${ctx.softDeletes && !ctx.viewNames.has(hasMany.to) ? ' AND "deletedAt" IS NULL' : ''} ORDER BY "id"`)
-        .all(...parentIds) as any[];
-
       const groups = new Map<number, any[]>();
       const childSchema = ctx.schemas[hasMany.to]!;
-      for (const rawRow of childRows) {
-        const entity = ctx.attachMethods(
-          hasMany.to,
-          transformFromStorage(rawRow, childSchema),
-        );
-        const parentId = rawRow[fk] as number;
-        if (!groups.has(parentId)) groups.set(parentId, []);
-        groups.get(parentId)!.push(entity);
+      const table = `"${hasMany.to.replace(/"/g, '""')}"`;
+      const column = `"${fk.replace(/"/g, '""')}"`;
+      const visible = ctx.softDeletes && !ctx.viewNames.has(hasMany.to)
+        ? ' AND "deletedAt" IS NULL' : '';
+      for (let start = 0; start < parentIds.length; start += MAX_RELATION_IDS) {
+        const batch = parentIds.slice(start, start + MAX_RELATION_IDS);
+        const placeholders = batch.map(() => "?").join(", ");
+        const childRows = ctx._stmt(
+          `SELECT * FROM ${table} WHERE ${column} IN (${placeholders})${visible} ORDER BY "id"`,
+        ).all(...batch) as any[];
+        for (const rawRow of childRows) {
+          const entity = ctx.attachMethods(
+            hasMany.to,
+            transformFromStorage(rawRow, childSchema),
+          );
+          const parentId = rawRow[fk] as number;
+          if (!groups.has(parentId)) groups.set(parentId, []);
+          groups.get(parentId)!.push(entity);
+        }
       }
       return { key: relation, table: hasMany.to, groups, many: true };
     }
@@ -185,23 +194,48 @@ export function createQueryBuilder(
     );
     if (belongsTo) {
       const fk = belongsTo.foreignKey;
-      // Only the requested parents are inspected; no unrelated parent can
-      // leak into a group when two FKs reference the same target table.
-      const placeholders = parentIds.map(() => "?").join(", ");
-      const parentRows = ctx._stmt(
-        `SELECT "id", "${fk.replace(/"/g, '""')}" FROM "${parentTable.replace(/"/g, '""')}" WHERE "id" IN (${placeholders})`,
-      ).all(...parentIds) as any[];
-      const targetIds = [...new Set(parentRows.map((r) => r[fk]).filter((id) => typeof id === "number"))];
+      // Full rows (including already eager-loaded children) already carry
+      // the FK. Retain the original lookup for projections without the FK.
+      let parentRows: any[];
+      if (sourceRows && sourceRows.every(row => {
+        const descriptor = Object.getOwnPropertyDescriptor(row, fk);
+        return typeof row.id === "number" && descriptor && "value" in descriptor;
+      })) {
+        // Read the original field, not a possibly overriding computed getter.
+        parentRows = sourceRows.map(row => ({
+          id: row.id,
+          [fk]: Object.getOwnPropertyDescriptor(row, fk)!.value,
+        }));
+      } else {
+        parentRows = [];
+        const table = `"${parentTable.replace(/"/g, '""')}"`;
+        const column = `"${fk.replace(/"/g, '""')}"`;
+        for (let start = 0; start < parentIds.length; start += MAX_RELATION_IDS) {
+          const batch = parentIds.slice(start, start + MAX_RELATION_IDS);
+          const placeholders = batch.map(() => "?").join(", ");
+          parentRows.push(...ctx._stmt(
+            `SELECT "id", ${column} FROM ${table} WHERE "id" IN (${placeholders})`,
+          ).all(...batch) as any[]);
+        }
+      }
+      const targetIds = [...new Set(parentRows.map((r) => r[fk])
+        .filter((id) => typeof id === "number"))];
       const groups = new Map<number, any>();
       if (targetIds.length > 0) {
-        const targetPlaceholders = targetIds.map(() => "?").join(", ");
-        const targetRows = ctx._stmt(
-          `SELECT * FROM "${belongsTo.to.replace(/"/g, '""')}" WHERE "id" IN (${targetPlaceholders})${ctx.softDeletes && !ctx.viewNames.has(belongsTo.to) ? ' AND "deletedAt" IS NULL' : ''}`,
-        ).all(...targetIds) as any[];
+        const table = `"${belongsTo.to.replace(/"/g, '""')}"`;
+        const visible = ctx.softDeletes && !ctx.viewNames.has(belongsTo.to)
+          ? ' AND "deletedAt" IS NULL' : '';
         const schema = ctx.schemas[belongsTo.to]!;
         const byId = new Map<number, any>();
-        for (const row of targetRows)
-          byId.set(row.id, ctx.attachMethods(belongsTo.to, transformFromStorage(row, schema)));
+        for (let start = 0; start < targetIds.length; start += MAX_RELATION_IDS) {
+          const batch = targetIds.slice(start, start + MAX_RELATION_IDS);
+          const placeholders = batch.map(() => "?").join(", ");
+          const targetRows = ctx._stmt(
+            `SELECT * FROM ${table} WHERE "id" IN (${placeholders})${visible}`,
+          ).all(...batch) as any[];
+          for (const row of targetRows)
+            byId.set(row.id, ctx.attachMethods(belongsTo.to, transformFromStorage(row, schema)));
+        }
         for (const row of parentRows) groups.set(row.id, byId.get(row[fk]) ?? null);
       }
       return { key: relation, table: belongsTo.to, groups, many: false };
