@@ -166,7 +166,73 @@ export type Relationship = {
 
 export type InferSchema<S extends z.ZodType<any>> = z.infer<S>;
 export type InputSchema<S extends z.ZodType<any>> = z.input<S>;
-export type EntityData<S extends z.ZodType<any>> = Omit<InputSchema<S>, "id">;
+/** SQLite allocates an id when omitted, but also accepts a supplied numeric id. */
+export type EntityData<S extends z.ZodType<any>> =
+  Omit<InputSchema<S>, "id"> & { id?: number };
+
+/** Partial writes never change the SQLite identity column. */
+export type UpdateData<S extends z.ZodType<any>> =
+  Partial<Omit<InputSchema<S>, "id">> & { id?: never };
+
+/** Runtime-installed columns are only available when their options are literally true. */
+export type GeneratedColumns<O> =
+  (O extends { timestamps: true }
+    ? { createdAt: string; updatedAt: string }
+    : {}) &
+  (O extends { softDeletes: true }
+    ? { deletedAt: string | null }
+    : {});
+
+/** Filter out entity navigation and mutation methods: they are not SQL columns. */
+export type StoredColumns<T> = Pick<T, {
+  [K in keyof T]-?: T[K] extends (...args: any[]) => any ? never : K
+}[keyof T]>;
+
+/** `where()` consumes scalar values or supported per-field operator objects. */
+export type FieldOperators<V> = {
+  $gt?: Exclude<V, undefined>;
+  $gte?: Exclude<V, undefined>;
+  $lt?: Exclude<V, undefined>;
+  $lte?: Exclude<V, undefined>;
+  $ne?: Exclude<V, undefined> | null;
+  $in?: Exclude<V, undefined>[];
+  $notIn?: Exclude<V, undefined>[];
+  $between?: [Exclude<V, undefined>, Exclude<V, undefined>];
+  // SQLite LIKE also operates on non-TEXT columns by coercion.
+  $like?: string;
+  $isNull?: boolean;
+  $isNotNull?: boolean;
+};
+export type WhereFields<T> = {
+  [K in keyof StoredColumns<T>]?: StoredColumns<T>[K] | null |
+    FieldOperators<StoredColumns<T>[K]>;
+};
+export type WhereInput<T> = WhereFields<T> & {
+  $or?: WhereFields<T>[];
+};
+
+/** Raw SQL reads do not run schema deserializers or attach entity methods. */
+/**
+ * What SQLite hands back for a field without parsing. `boolean` is checked
+ * before distributing: a distributive check sees `true | false` as two
+ * literals (stored as text) and widened z.boolean() to `number | string`.
+ */
+export type RawValue<V> = [NonNullable<V>] extends [never] ? V
+  : [NonNullable<V>] extends [boolean]
+    ? (boolean extends NonNullable<V> ? number : number | string) | Extract<V, null | undefined>
+    : RawValueEach<V>;
+type RawValueEach<V> = V extends null | undefined ? V
+  : V extends Date ? string
+  : V extends boolean ? (boolean extends V ? number : number | string)
+  : V extends number ? (number extends V ? number : string)
+  : V extends bigint ? string
+  : V extends Uint8Array ? Uint8Array
+  : V extends object ? string
+  : V;
+export type RawRow<T> = {
+  [K in keyof StoredColumns<T>]: RawValue<StoredColumns<T>[K]>;
+};
+
 
 // Navigation Type Inference (simple approach)
 // =============================================================================
@@ -209,9 +275,9 @@ type InverseBase<
  * Base entity type with schema fields, id, update(), delete().
  * No nav methods — those are added by NavMethods.
  */
-type BaseEntity<S extends z.ZodType<any>> = z.infer<S> & {
+type BaseEntity<S extends z.ZodType<any>, O = {}> = z.infer<S> & GeneratedColumns<O> & {
   id: number;
-  update: (data: Partial<Omit<z.input<S>, "id">>) => BaseEntity<S> | null;
+  update: (data: UpdateData<S>) => BaseEntity<S, O> | null;
   delete: () => void;
 };
 
@@ -223,12 +289,13 @@ type BelongsToNav<
   S extends SchemaMap,
   R extends RelationsConfig,
   Table extends string,
+  O = {},
 > = Table extends keyof R
   ? {
       readonly [
         FK in Extract<keyof R[Table], string> as NavigationName<S[Table & keyof S], StripIdSuffix<FK>>
       ]: R[Table][FK] extends keyof S
-        ? () => BaseEntity<S[R[Table][FK]]> | null
+        ? () => BaseEntity<S[R[Table][FK]], O> | null
         : never;
     }
   : {};
@@ -239,12 +306,13 @@ type HasManyForChild<
   R extends RelationsConfig,
   Parent extends string,
   Child extends Extract<keyof R & keyof S, string>,
+  O = {},
 > = {
   readonly [FK in FKsTo<R[Child], Parent> as NavigationName<
     S[Parent & keyof S],
     InverseBase<R, Child, Parent, FK>,
     Extract<keyof BelongsToNav<S, R, Parent>, string>
-  >]: () => BaseEntity<S[Child]>[];
+  >]: () => BaseEntity<S[Child], O>[];
 };
 
 type UnionToIntersection<U> = (
@@ -255,9 +323,10 @@ type HasManyNav<
   S extends SchemaMap,
   R extends RelationsConfig,
   Parent extends string,
+  O = {},
 > = UnionToIntersection<{
   [Child in Extract<keyof R & keyof S, string>]:
-    HasManyForChild<S, R, Parent, Child>;
+    HasManyForChild<S, R, Parent, Child, O>;
 }[Extract<keyof R & keyof S, string>]>;
 
 // =============================================================================
@@ -276,9 +345,75 @@ export type NavEntity<
   S extends SchemaMap,
   R extends RelationsConfig,
   Table extends string,
-> = BaseEntity<S[Table & keyof S]> &
-  BelongsToNav<S, R, Table> &
-  HasManyNav<S, R, Table>;
+  O = {},
+> = BaseEntity<S[Table & keyof S], O> &
+  BelongsToNav<S, R, Table, O> &
+  HasManyNav<S, R, Table, O>;
+
+/** Relation metadata for eager load inference, preserving both FK directions. */
+type ForwardRelations<S extends SchemaMap, R extends RelationsConfig, T extends string> =
+  T extends keyof R ? {
+    [FK in Extract<keyof R[T], string> as NavigationName<
+      S[T & keyof S], StripIdSuffix<FK>
+    >]: R[T][FK] extends keyof S
+      ? { table: Extract<R[T][FK], keyof S & string>; many: false }
+      : never;
+  } : {};
+
+type InverseRelationsFor<
+  S extends SchemaMap, R extends RelationsConfig, Parent extends string,
+  Child extends Extract<keyof R & keyof S, string>
+> = {
+  [FK in FKsTo<R[Child], Parent> as NavigationName<
+    S[Parent & keyof S], InverseBase<R, Child, Parent, FK>,
+    Extract<keyof BelongsToNav<S, R, Parent>, string>
+  >]: { table: Child; many: true };
+};
+
+type InverseRelations<S extends SchemaMap, R extends RelationsConfig, T extends string> =
+  UnionToIntersection<{
+    [Child in Extract<keyof R & keyof S, string>]:
+      InverseRelationsFor<S, R, T, Child>
+  }[Extract<keyof R & keyof S, string>]>;
+
+type RelationMap<S extends SchemaMap, R extends RelationsConfig, T extends string> =
+  ForwardRelations<S, R, T> & InverseRelations<S, R, T>;
+
+type PathHead<P extends string> = P extends `${infer H}.${string}` ? H : P;
+type PathTail<P extends string, K extends string> =
+  P extends `${K}.${infer Tail}` ? Tail : never;
+
+type EagerColumn<
+  S extends SchemaMap, R extends RelationsConfig, Info, Tail extends string,
+  Depth extends unknown[], O
+> = Info extends { table: infer Child extends keyof S & string; many: infer Many }
+  ? Many extends true
+    ? EagerWith<NavEntity<S, R, Child, O>, S, R, Child, Tail, Depth, O>[]
+    : EagerWith<NavEntity<S, R, Child, O>, S, R, Child, Tail, Depth, O> | null
+  : never;
+
+type EagerPatch<
+  S extends SchemaMap, R extends RelationsConfig, T extends string,
+  Paths extends string, Depth extends unknown[], O
+> = {
+  [K in Extract<keyof RelationMap<S, R, T>, PathHead<Paths>>]:
+    EagerColumn<S, R, RelationMap<S, R, T>[K], PathTail<Paths, K>, [...Depth, 0], O>;
+};
+
+/**
+ * Eager relations replace lazy methods with their actual values. A selected
+ * projection without `id` cannot be eagerly hydrated by the runtime.
+ * Stops traversing at depth four to bound compiler work.
+ */
+export type EagerWith<
+  T, S extends SchemaMap, R extends RelationsConfig, Table extends string,
+  Paths extends string, Depth extends unknown[] = [], O = {}
+> = [Table] extends [never] ? T
+  : "id" extends keyof T
+    ? Depth["length"] extends 4 ? T
+      : Omit<T, keyof EagerPatch<S, R, Table, Paths, Depth, O>> &
+        EagerPatch<S, R, Table, Paths, Depth, O>
+    : T;
 
 // =============================================================================
 // Entity Accessors
@@ -286,17 +421,17 @@ export type NavEntity<
 
 /** Fluent update builder */
 export type UpdateBuilder<T> = {
-  where: (conditions: Record<string, any>) => UpdateBuilder<T>;
+  where: (conditions: WhereInput<T>) => UpdateBuilder<T>;
   exec: () => number;
 };
 
 /** Fluent delete builder */
 export type DeleteBuilder<T> = {
-  where: (conditions: Record<string, any>) => DeleteBuilder<T>;
+  where: (conditions: WhereInput<T>) => DeleteBuilder<T>;
   exec: () => number;
 };
 
-export type ConflictColumn<T> = Extract<keyof T, string> | "id";
+export type ConflictColumn<T> = Extract<keyof StoredColumns<T>, string> | "id";
 
 export type ConflictExpression = {
   readonly sql: string;
@@ -371,62 +506,63 @@ export type NavEntityAccessor<
   S extends SchemaMap,
   R extends RelationsConfig,
   Table extends string,
+  O = {},
 > = {
-  get: (id: number) => NavEntity<S, R, Table> | null;
+  get: (id: number) => NavEntity<S, R, Table, O> | null;
   insert: (
-    data: Omit<z.input<S[Table & keyof S]>, "id">,
-  ) => NavEntity<S, R, Table>;
+    data: EntityData<S[Table & keyof S]>,
+  ) => NavEntity<S, R, Table, O>;
   insertMany: (
-    rows: Omit<z.input<S[Table & keyof S]>, "id">[],
-  ) => NavEntity<S, R, Table>[];
+    rows: EntityData<S[Table & keyof S]>[],
+  ) => NavEntity<S, R, Table, O>[];
   update: ((
     id: number,
-    data: Partial<Omit<z.input<S[Table & keyof S]>, "id">>,
-  ) => NavEntity<S, R, Table> | null) &
+    data: UpdateData<S[Table & keyof S]>,
+  ) => NavEntity<S, R, Table, O> | null) &
     ((
-      data: Partial<Omit<z.input<S[Table & keyof S]>, "id">>,
-    ) => UpdateBuilder<NavEntity<S, R, Table>>);
+      data: UpdateData<S[Table & keyof S]>,
+    ) => UpdateBuilder<NavEntity<S, R, Table, O>>);
   upsert: ((
-    conditions?: Partial<z.infer<S[Table & keyof S]>>,
-    data?: Partial<z.infer<S[Table & keyof S]>>,
-  ) => NavEntity<S, R, Table>) &
+    conditions?: Partial<z.input<S[Table & keyof S]>>,
+    data?: Partial<z.input<S[Table & keyof S]>>,
+  ) => NavEntity<S, R, Table, O>) &
     ((
-      data: Omit<z.input<S[Table & keyof S]>, "id">,
-      options: UpsertConflictOptions<NavEntity<S, R, Table>>,
-    ) => NavEntity<S, R, Table>);
+      data: EntityData<S[Table & keyof S]>,
+      options: UpsertConflictOptions<NavEntity<S, R, Table, O>>,
+    ) => NavEntity<S, R, Table, O>);
   /** Compatibility alias for the native conflict-upsert path. Prefer `.upsert(row, { on, merge })`. */
   upsertOnConflict: (
-    data: Omit<z.input<S[Table & keyof S]>, "id">,
+    data: EntityData<S[Table & keyof S]>,
     target:
-      | ConflictColumn<NavEntity<S, R, Table>>
-      | ConflictColumn<NavEntity<S, R, Table>>[],
+      | ConflictColumn<NavEntity<S, R, Table, O>>
+      | ConflictColumn<NavEntity<S, R, Table, O>>[],
     merge: (
-      t: ConflictMergeHelpers<NavEntity<S, R, Table>>,
+      t: ConflictMergeHelpers<NavEntity<S, R, Table, O>>,
     ) => Partial<
-      Record<ConflictColumn<NavEntity<S, R, Table>>, ConflictExpression>
+      Record<ConflictColumn<NavEntity<S, R, Table, O>>, ConflictExpression>
     >,
-  ) => NavEntity<S, R, Table>;
+  ) => NavEntity<S, R, Table, O>;
   upsertMany: (
-    rows: Partial<z.infer<S[Table & keyof S]>>[],
-    conditions?: Partial<z.infer<S[Table & keyof S]>>,
-  ) => NavEntity<S, R, Table>[];
+    rows: Partial<z.input<S[Table & keyof S]>>[],
+    conditions?: Partial<z.input<S[Table & keyof S]>>,
+  ) => NavEntity<S, R, Table, O>[];
   findOrCreate: (
-    conditions: Partial<z.infer<S[Table & keyof S]>>,
-    defaults?: Partial<z.infer<S[Table & keyof S]>>,
-  ) => { entity: NavEntity<S, R, Table>; created: boolean };
+    conditions: Partial<z.input<S[Table & keyof S]>>,
+    defaults?: Partial<z.input<S[Table & keyof S]>>,
+  ) => { entity: NavEntity<S, R, Table, O>; created: boolean };
   delete: ((id: number) => void) &
-    (() => DeleteBuilder<NavEntity<S, R, Table>>);
+    (() => DeleteBuilder<NavEntity<S, R, Table, O>>);
   restore: (id: number) => void;
   select: {
-    (): QueryBuilder<NavEntity<S, R, Table>>;
-    <K extends (keyof z.infer<S[Table & keyof S]> | "id") & string>(
+    (): QueryBuilder<NavEntity<S, R, Table, O>, NavEntity<S, R, Table, O>, S, R, Table, false, O>;
+    <K extends (keyof z.infer<S[Table & keyof S]> | keyof GeneratedColumns<O> | "id") & string>(
       ...cols: K[]
-    ): QueryBuilder<NavEntity<S, R, Table>, Pick<NavEntity<S, R, Table>, K>>;
+    ): QueryBuilder<NavEntity<S, R, Table, O>, Pick<NavEntity<S, R, Table, O>, K>, S, R, Table, true, O>;
   };
   count: () => number;
   on: ((
     event: "insert" | "update",
-    callback: (row: NavEntity<S, R, Table>) => void | Promise<void>,
+    callback: (row: NavEntity<S, R, Table, O>) => void | Promise<void>,
   ) => () => void) &
     ((
       event: "delete",
@@ -440,8 +576,9 @@ export type NavEntityAccessor<
 export type TypedNavAccessors<
   S extends SchemaMap,
   R extends RelationsConfig,
+  O = {},
 > = {
-  [K in Extract<keyof S, string>]: NavEntityAccessor<S, R, K>;
+  [K in Extract<keyof S, string>]: NavEntityAccessor<S, R, K, O>;
 };
 
 // =============================================================================
@@ -450,7 +587,7 @@ export type TypedNavAccessors<
 
 export type AugmentedEntity<S extends z.ZodType<any>> = InferSchema<S> & {
   id: number;
-  update: (data: Partial<EntityData<S>>) => AugmentedEntity<S> | null;
+  update: (data: UpdateData<S>) => AugmentedEntity<S> | null;
   delete: () => void;
 };
 
@@ -464,9 +601,9 @@ export type EntityAccessor<S extends z.ZodType<any>> = {
   insertMany: (rows: EntityData<S>[]) => AugmentedEntity<S>[];
   update: ((
     id: number,
-    data: Partial<EntityData<S>>,
+    data: UpdateData<S>,
   ) => AugmentedEntity<S> | null) &
-    ((data: Partial<EntityData<S>>) => UpdateBuilder<AugmentedEntity<S>>);
+    ((data: UpdateData<S>) => UpdateBuilder<AugmentedEntity<S>>);
   upsert: ((
     conditions?: Partial<InferSchema<S>>,
     data?: Partial<InferSchema<S>>,
@@ -522,10 +659,10 @@ export type TypedAccessors<T extends SchemaMap> = {
 
 export type ReadonlyEntityAccessor<S extends z.ZodType<any>> = {
   select: {
-    (): QueryBuilder<ReadonlyEntity<S>>;
+    (): QueryBuilder<ReadonlyEntity<S>, ReadonlyEntity<S>, {}, {}, never, false, {}, false>;
     <K extends keyof InferSchema<S> & string>(
       ...cols: K[]
-    ): QueryBuilder<ReadonlyEntity<S>, Pick<ReadonlyEntity<S>, K>>;
+    ): QueryBuilder<ReadonlyEntity<S>, Pick<ReadonlyEntity<S>, K>, {}, {}, never, true, {}, false>;
   };
   count: () => number;
   _tableName: string;

@@ -23,6 +23,25 @@ import {
   OPERATOR_MAP,
   compileIQO, quoteIdentifierPath,
 } from "./iqo";
+import type {
+  SchemaMap, RelationsConfig, EagerWith, WhereInput, StoredColumns, RawRow, RawValue,
+} from "./types";
+
+/**
+ * HAVING compiles a restricted operator subset; IN/BETWEEN/LIKE are
+ * deliberately not allowed by compileIQO's HAVING compiler.
+ */
+type HavingScalar = string | number | boolean | bigint | null | Date | Uint8Array;
+type HavingOperators = {
+  $gt?: HavingScalar;
+  $gte?: HavingScalar;
+  $lt?: HavingScalar;
+  $lte?: HavingScalar;
+  $ne?: HavingScalar;
+  $isNull?: boolean;
+  $isNotNull?: boolean;
+};
+type HavingInput = Record<string, HavingScalar | HavingOperators>;
 
 export type QueryCacheOptions = {
   /** How long this specific query result should stay in the in-process cache. */
@@ -63,6 +82,12 @@ function cacheKeyFor(
 export class QueryBuilder<
   T extends Record<string, any>,
   TResult extends Record<string, any> = T,
+  S extends SchemaMap = {},
+  R extends RelationsConfig = {},
+  Table extends string = never,
+  Selected extends boolean = false,
+  O = {},
+  Writable extends boolean = true,
 > {
   private iqo: IQO;
   private tableName: string;
@@ -136,7 +161,12 @@ export class QueryBuilder<
 
   /** Specify which columns to select. If called with no arguments, defaults to `*`. */
   select(): this;
-  select<K extends keyof T & string>(...cols: K[]): QueryBuilder<T, Pick<T, K>>;
+  select<K extends keyof StoredColumns<T> & string>(
+    ...cols: K[]
+  ): QueryBuilder<
+    T, Selected extends true ? TResult & Pick<T, K> : Pick<T, K>,
+    S, R, Table, true, O, Writable
+  >;
   select(...cols: string[]): any {
     this.iqo.selects.push(...cols);
     return this;
@@ -161,9 +191,7 @@ export class QueryBuilder<
    */
   where(
     criteriaOrCallback:
-      | (Partial<Record<keyof T & string, any>> & {
-          $or?: Partial<Record<keyof T & string, any>>[];
-        })
+      | WhereInput<T>
       | WhereCallback<T>,
   ): this {
     if (typeof criteriaOrCallback === "function") {
@@ -276,7 +304,7 @@ export class QueryBuilder<
   }
 
   /** Add ORDER BY clauses. */
-  orderBy(field: keyof T & string, direction: OrderDirection = "asc"): this {
+  orderBy(field: keyof StoredColumns<T> & string, direction: OrderDirection = "asc"): this {
     this.iqo.orderBy.push({ field, direction });
     return this;
   }
@@ -294,8 +322,10 @@ export class QueryBuilder<
    * db.trees.select('name').join('forests', 'forestId', ['name']).all()
    * ```
    */
-  join(accessor: { _tableName: string }, columns?: string[]): this;
-  join(table: string, fk: string, columns?: string[], pk?: string): this;
+  join(accessor: { _tableName: string }, columns?: string[]):
+    QueryBuilder<T, RawRow<TResult>, S, R, Table, Selected, O, Writable>;
+  join(table: string, fk: string, columns?: string[], pk?: string):
+    QueryBuilder<T, RawRow<TResult>, S, R, Table, Selected, O, Writable>;
   join(
     tableOrAccessor: string | { _tableName: string },
     fkOrCols?: string | string[],
@@ -337,9 +367,9 @@ export class QueryBuilder<
   }
 
   /** Skip Zod parsing and return raw SQLite row objects. */
-  raw(): this {
+  raw(): QueryBuilder<T, RawRow<TResult>, S, R, Table, Selected, O, Writable> {
     this.iqo.raw = true;
-    return this;
+    return this as unknown as QueryBuilder<T, RawRow<TResult>, S, R, Table, Selected, O, Writable>;
   }
 
   /**
@@ -389,9 +419,9 @@ export class QueryBuilder<
    * db.users.select().whereIn('id', db.orders.select('userId')).all()
    * ```
    */
-  whereIn(
-    column: keyof T & string,
-    values: any[] | QueryBuilder<any, any>,
+  whereIn<K extends keyof StoredColumns<T> & string>(
+    column: K,
+    values: StoredColumns<T>[K][] | QueryBuilder<any, any>,
   ): this {
     if (Array.isArray(values)) {
       this.iqo.wheres.push({
@@ -411,9 +441,9 @@ export class QueryBuilder<
   /**
    * Filter by column value NOT being in a list or subquery.
    */
-  whereNotIn(
-    column: keyof T & string,
-    values: any[] | QueryBuilder<any, any>,
+  whereNotIn<K extends keyof StoredColumns<T> & string>(
+    column: K,
+    values: StoredColumns<T>[K][] | QueryBuilder<any, any>,
   ): this {
     if (Array.isArray(values)) {
       this.iqo.wheres.push({
@@ -435,9 +465,13 @@ export class QueryBuilder<
    * Runs a single batched query (WHERE fk IN (...)) per relation,
    * avoiding the N+1 problem of lazy navigation.
    */
-  with(...relations: string[]): this {
+  with<const Path extends string>(
+    ...relations: Path[]
+  ): QueryBuilder<T, EagerWith<TResult, S, R, Table, Path, [], O>, S, R, Table, Selected, O, Writable> {
     this.iqo.includes.push(...relations);
-    return this;
+    return this as unknown as QueryBuilder<
+      T, EagerWith<TResult, S, R, Table, Path, [], O>, S, R, Table, Selected, O, Writable
+    >;
   }
 
   /** Internal: apply eager loads to a set of results */
@@ -636,7 +670,7 @@ export class QueryBuilder<
    *   .raw().all()
    * ```
    */
-  having(conditions: Record<string, any>): this {
+  having(conditions: HavingInput): this {
     for (const [field, value] of Object.entries(conditions)) {
       if (
         typeof value === "object" &&
@@ -673,7 +707,7 @@ export class QueryBuilder<
   }
 
   /** Returns the SUM of a numeric column. */
-  sum(field: keyof T & string): number {
+  sum(field: keyof StoredColumns<T> & string): number {
     const { sql: selectSql, params } = compileIQO(this.tableName, this.iqo);
     const aggSql = selectSql.replace(
       /^SELECT .+? FROM/,
@@ -687,7 +721,7 @@ export class QueryBuilder<
   }
 
   /** Returns the AVG of a numeric column. */
-  avg(field: keyof T & string): number {
+  avg(field: keyof StoredColumns<T> & string): number {
     const { sql: selectSql, params } = compileIQO(this.tableName, this.iqo);
     const aggSql = selectSql.replace(
       /^SELECT .+? FROM/,
@@ -700,7 +734,7 @@ export class QueryBuilder<
   }
 
   /** Returns the MIN of a column. */
-  min(field: keyof T & string): number | string | null {
+  min(field: keyof StoredColumns<T> & string): number | string | Uint8Array | null {
     const { sql: selectSql, params } = compileIQO(this.tableName, this.iqo);
     const aggSql = selectSql.replace(
       /^SELECT .+? FROM/,
@@ -713,7 +747,7 @@ export class QueryBuilder<
   }
 
   /** Returns the MAX of a column. */
-  max(field: keyof T & string): number | string | null {
+  max(field: keyof StoredColumns<T> & string): number | string | Uint8Array | null {
     const { sql: selectSql, params } = compileIQO(this.tableName, this.iqo);
     const aggSql = selectSql.replace(
       /^SELECT .+? FROM/,
@@ -812,7 +846,9 @@ export class QueryBuilder<
    * db.users.select().pluck('name') // → ['Alice', 'Bob', 'Charlie']
    * ```
    */
-  pluck(column: keyof T & string): any[] {
+  pluck<K extends keyof StoredColumns<T> & string>(
+    column: K,
+  ): RawValue<StoredColumns<T>[K]>[] {
     const { sql: selectSql, params } = compileIQO(this.tableName, this.iqo);
     const pluckSql = selectSql.replace(
       /^SELECT .+? FROM/,
@@ -827,12 +863,12 @@ export class QueryBuilder<
         const results = this.executor(pluckSql, params, true);
         return results.map((r: any) => r[column]);
       },
-    );
+    ) as RawValue<StoredColumns<T>[K]>[];
   }
 
   /** Clone this QueryBuilder so you can fork a query. */
-  clone(): QueryBuilder<T, TResult> {
-    const cloned = new QueryBuilder<T, TResult>(
+  clone(): QueryBuilder<T, TResult, S, R, Table, Selected, O, Writable> {
+    const cloned = new QueryBuilder<T, TResult, S, R, Table, Selected, O, Writable>(
       this.tableName,
       this.executor,
       this.singleExecutor,
@@ -855,7 +891,7 @@ export class QueryBuilder<
    * db.users.select().where({ role: 'guest' }).updateAll({ role: 'member' })
    * ```
    */
-  updateAll(data: Partial<T>): number {
+  updateAll(data: Writable extends true ? Partial<StoredColumns<T>> : never): number {
     const { sql: selectSql, params } = compileIQO(this.tableName, this.iqo);
     // Extract WHERE clause from compiled SELECT
     const whereMatch = selectSql.match(
@@ -894,7 +930,7 @@ export class QueryBuilder<
    * db.users.select().where({ role: 'guest' }).deleteAll()
    * ```
    */
-  deleteAll(): number {
+  deleteAll(this: Writable extends true ? QueryBuilder<T, TResult, S, R, Table, Selected, O, Writable> : never): number {
     const { sql: selectSql, params } = compileIQO(this.tableName, this.iqo);
     const whereMatch = selectSql.match(
       /WHERE (.+?)(?:\s+ORDER|\s+LIMIT|\s+GROUP|\s+HAVING|$)/s,
@@ -914,7 +950,7 @@ export class QueryBuilder<
    * db.users.select().where({ id: 1 }).increment('score', 10)
    * ```
    */
-  increment(column: keyof T & string, amount: number = 1): number {
+  increment(column: Writable extends true ? keyof StoredColumns<T> & string : never, amount: number = 1): number {
     const { sql: selectSql, params } = compileIQO(this.tableName, this.iqo);
     const whereMatch = selectSql.match(
       /WHERE (.+?)(?:\s+ORDER|\s+LIMIT|\s+GROUP|\s+HAVING|$)/s,
@@ -934,7 +970,7 @@ export class QueryBuilder<
    * db.users.select().where({ id: 1 }).decrement('score', 5)
    * ```
    */
-  decrement(column: keyof T & string, amount: number = 1): number {
+  decrement(column: Writable extends true ? keyof StoredColumns<T> & string : never, amount: number = 1): number {
     return this.increment(column, -amount);
   }
 

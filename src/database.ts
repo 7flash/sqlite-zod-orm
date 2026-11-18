@@ -1163,12 +1163,13 @@ class _Database<Schemas extends SchemaMap> {
       );
 
       if (listeners.length > 0) {
+        // Insert/update listeners get the whole current row (soft-deleted rows
+        // included). A row hard-deleted before this poll has no row to give;
+        // its delete event follows, so the insert/update is skipped.
         const payload =
           change.op === "delete"
             ? { id: change.row_id }
-            // A later delete (or a soft delete) must not erase an earlier event.
-            // No historical payload is stored, so retain at least the row id.
-            : (getById(this._ctx, change.tbl, change.row_id, true) ?? { id: change.row_id });
+            : getById(this._ctx, change.tbl, change.row_id, true);
         if (payload) {
           for (const l of listeners) {
             // A listener removed by an earlier listener in this dispatch is skipped.
@@ -1192,6 +1193,8 @@ class _Database<Schemas extends SchemaMap> {
   // =========================================================================
 
   public transaction<T>(
+    // Not typed as "no Promise": generic wrappers (fn: () => T) could not call
+    // it. An async callback still throws at run time.
     callback: () => T,
     options: TransactionOptions = {},
   ): T {
@@ -1501,19 +1504,21 @@ type Database<
   S extends SchemaMap,
   R extends RelationsConfig = {},
   V extends ViewDefinitions = {},
+  O extends { timestamps?: boolean; softDeletes?: boolean } = {},
 > = _Database<S> &
-  TypedNavAccessors<S, R> &
+  TypedNavAccessors<S, R, O> &
   TypedReadonlyAccessors<ViewSchemas<V>>;
 
 const Database = _Database as unknown as new <
   S extends SchemaMap,
   const R extends RelationsConfig = {},
   const V extends ViewDefinitions = {},
+  const O extends { timestamps?: boolean; softDeletes?: boolean } = {},
 >(
   dbFile: string,
   schemas: S,
-  options?: DatabaseOptions<R, V>,
-) => Database<S, R, V>;
+  options?: DatabaseOptions<R, V> & O,
+) => Database<S, R, V, O>;
 
 export { Database };
 export type { Database as DatabaseType };

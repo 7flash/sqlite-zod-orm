@@ -6,7 +6,7 @@
  * transaction rollback semantics remain identical to the original ORM.
  */
 import type { DatabaseContext } from "./context";
-import type { AugmentedEntity } from "./types";
+import type { AugmentedEntity, StoredColumns } from "./types";
 import { asZodObject } from "./types";
 import { transformForStorage, transformFromStorage } from "./schema";
 
@@ -45,38 +45,38 @@ export class ConflictMergeHelpers<
   constructor(private readonly tableName: string) {}
 
   /** Current persisted value: table.field */
-  current<K extends keyof T & string>(field: K): ConflictExpr {
+  current<K extends keyof StoredColumns<T> & string>(field: K): ConflictExpr {
     return makeExpr(`${quoteIdent(this.tableName)}.${quoteIdent(field)}`);
   }
 
   /** Incoming value from the failed INSERT: excluded.field */
-  excluded<K extends keyof T & string>(field: K): ConflictExpr {
+  excluded<K extends keyof StoredColumns<T> & string>(field: K): ConflictExpr {
     return makeExpr(`excluded.${quoteIdent(field)}`);
   }
 
   /** Use incoming value when it is non-null, otherwise keep the current table value. */
-  excludedIfNotNull<K extends keyof T & string>(field: K): ConflictExpr {
+  excludedIfNotNull<K extends keyof StoredColumns<T> & string>(field: K): ConflictExpr {
     return makeExpr(
       `COALESCE(excluded.${quoteIdent(field)}, ${quoteIdent(this.tableName)}.${quoteIdent(field)})`,
     );
   }
 
   /** Use incoming value when it is neither NULL nor '', otherwise keep the current table value. */
-  excludedIfNotEmpty<K extends keyof T & string>(field: K): ConflictExpr {
+  excludedIfNotEmpty<K extends keyof StoredColumns<T> & string>(field: K): ConflictExpr {
     return makeExpr(
       `COALESCE(NULLIF(excluded.${quoteIdent(field)}, ''), ${quoteIdent(this.tableName)}.${quoteIdent(field)})`,
     );
   }
 
   /** Keep the first non-null value: current value wins unless it is NULL. */
-  keepFirst<K extends keyof T & string>(field: K): ConflictExpr {
+  keepFirst<K extends keyof StoredColumns<T> & string>(field: K): ConflictExpr {
     return makeExpr(
       `COALESCE(${quoteIdent(this.tableName)}.${quoteIdent(field)}, excluded.${quoteIdent(field)})`,
     );
   }
 
   /** Keep the greater numeric value. */
-  max<K extends keyof T & string>(field: K, fallback = 0): ConflictExpr {
+  max<K extends keyof StoredColumns<T> & string>(field: K, fallback = 0): ConflictExpr {
     if (!Number.isFinite(fallback))
       throw new Error("max() fallback must be a finite number.");
     const col = quoteIdent(field);
@@ -87,25 +87,25 @@ export class ConflictMergeHelpers<
   }
 
   // Backwards-compatible verbose aliases from the first conflict-upsert draft.
-  coalesceExcluded<K extends keyof T & string>(field: K): ConflictExpr {
+  coalesceExcluded<K extends keyof StoredColumns<T> & string>(field: K): ConflictExpr {
     return this.excludedIfNotNull(field);
   }
 
-  coalesceExcludedNonEmpty<K extends keyof T & string>(field: K): ConflictExpr {
+  coalesceExcludedNonEmpty<K extends keyof StoredColumns<T> & string>(field: K): ConflictExpr {
     return this.excludedIfNotEmpty(field);
   }
 
-  coalesceCurrentExcluded<K extends keyof T & string>(field: K): ConflictExpr {
+  coalesceCurrentExcluded<K extends keyof StoredColumns<T> & string>(field: K): ConflictExpr {
     return this.keepFirst(field);
   }
 
-  keepExistingIfExcludedEmpty<K extends keyof T & string>(
+  keepExistingIfExcludedEmpty<K extends keyof StoredColumns<T> & string>(
     field: K,
   ): ConflictExpr {
     return this.excludedIfNotEmpty(field);
   }
 
-  maxCurrentExcluded<K extends keyof T & string>(
+  maxCurrentExcluded<K extends keyof StoredColumns<T> & string>(
     field: K,
     fallback = 0,
   ): ConflictExpr {

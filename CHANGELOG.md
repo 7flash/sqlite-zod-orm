@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.1.0 (2026-11-18)
+
+The types now say what the code returns. Found by a type matrix (`test/types-matrix.test.ts`: every public API, each type assertion paired with a run-time check of the same fact; 63 of its assertions fail to compile on 4.0.11).
+
+### Types
+- `.with('user')` results type the loaded row (or `null`), `.with('posts')` an array, nested paths up to four levels; before, the type still said "lazy accessor function".
+- `timestamps: true` / `softDeletes: true` add `createdAt`/`updatedAt`/`deletedAt` to row types, only when on.
+- `where()` checks operators per column: `$in` takes an array, `$between` a pair, unknown `$` operators and non-columns are type errors; `null` is allowed (it means `IS NULL`).
+- `select('a').select('b')` types both columns (both are selected); relation accessors can't be selected as columns.
+- `.raw()`, joins and `.pluck()` type the stored SQLite values (dates as text, booleans as 0/1), not parsed entities.
+- Read-only views have no write methods in their query type; `update()` can't change `id`; `insert()` accepts an explicit numeric `id`.
+
+### Changed
+- `.on('insert' | 'update')` listeners always get the whole row. A row hard-deleted before the poll is skipped (its delete event follows) instead of arriving as `{ id }` as in 4.0.10; soft-deleted rows still arrive whole, with `deletedAt`.
+
+### Checked against real apps
+- `scripts/typecheck-apps.ts <app>...` type-checks apps against this version without touching them. agenthub, bgr, cnc, crowdclaw, diadem, gxy-aa, prompt-proxy, prompts-explorer and starwar: no new type errors. ChatGPT's draft also made `transaction()` reject async callbacks by type; that broke crowdclaw's generic `withSqliteRetry<T>(fn: () => T)` wrapper, so it was dropped (async callbacks still throw at run time).
+
 ## 4.0.11 (2026-11-18)
 
 Found by running the library for real (`scripts/upgrade-e2e.ts`: builds a database with an old published version, opens the same file with this one, compares every field, writes, and runs `.on()` across two processes):

@@ -55,14 +55,13 @@ test("regression: separate readers never steal each other's unconsumed changes",
   } finally { stops.forEach((off) => off()); a.close(); b.close(); }
 }));
 
-test("regression: insert then hard-delete before polling reports both ids in order", () => {
+test("insert then hard-delete before polling: only the delete is reported (no row to give)", () => {
   const db = make(); const got: Event[] = []; const off = listen(db, got);
   try {
     const row = db.notes.insert({ text: "ephemeral" });
     db.notes.delete(row.id);
     drain(db);
     expect(got).toEqual([
-      { op: "insert", table: "notes", id: row.id },
       { op: "delete", table: "notes", id: row.id },
     ]);
   } finally { off.forEach((f) => f()); db.close(); }
@@ -118,12 +117,12 @@ test("bulk, partial update, upsert branches, and fluent delete report physical r
     const c = db.raw<{ id: number }>('SELECT id FROM notes WHERE text = ?', "C")[0]!.id;
     db.notes.delete().where({ id: { $gte: b.id, $lte: c } }).exec();
     drain(db);
+    // b and c are gone by the time of the poll: only their deletes are reported.
     expect(seen).toEqual([
-      ...[a.id, b.id].map((id) => ({ op: "insert" as const, table: "notes", id })),
+      { op: "insert", table: "notes", id: a.id },
       { op: "update", table: "notes", id: a.id },
-      ...[a.id, b.id].map((id) => ({ op: "update" as const, table: "notes", id })),
       { op: "update", table: "notes", id: a.id },
-      { op: "insert", table: "notes", id: c },
+      { op: "update", table: "notes", id: a.id },
       ...[b.id, c].map((id) => ({ op: "delete" as const, table: "notes", id })),
     ]);
   } finally { off.forEach((f) => f()); db.close(); }
@@ -225,14 +224,14 @@ test("4,096 deterministic seeded sequences: compare exact event order/count afte
       trace.push(`insert(${a.id})`);
       expected.push({ op: "insert", table: "notes", id: a.id });
       if (kind === 0) { db.notes.update(a.id, { n: seed }); trace.push(`update(${a.id})`); expected.push({ op: "update", table: "notes", id: a.id }); }
-      if (kind === 1) { db.notes.delete(a.id); trace.push(`delete(${a.id})`); expected.push({ op: "delete", table: "notes", id: a.id }); }
+      if (kind === 1) { db.notes.delete(a.id); trace.push(`delete(${a.id})`); expected.pop(); expected.push({ op: "delete", table: "notes", id: a.id }); }
       if (kind === 2) { db.notes.update({ n: seed }).where({ id: a.id }).exec(); trace.push(`bulkUpdate(${a.id})`); expected.push({ op: "update", table: "notes", id: a.id }); }
       if (kind === 3) { db.exec('UPDATE "notes" SET "n" = ? WHERE id = ?', seed, a.id); trace.push(`rawUpdate(${a.id})`); expected.push({ op: "update", table: "notes", id: a.id }); }
       if (kind === 4) { try { db.transaction(() => { db.notes.delete(a.id); throw Error("rollback"); }); } catch {} trace.push(`rollbackDelete(${a.id})`); }
       drain(db);
       // In case of failure the assertion identifies the seed and shortest
       // operation suffix to replay; each sequence is at most two operations.
-      const newEvents = expected.slice(expected.length - (kind === 4 ? 1 : 2));
+      const newEvents = expected.slice(expected.length - (kind === 4 || kind === 1 ? 1 : 2));
       const actualEvents = seen.slice(seen.length - newEvents.length);
       if (seen.length !== expected.length || JSON.stringify(actualEvents) !== JSON.stringify(newEvents)) {
         throw new Error(`seed=${seed} sequence=${trace.join(' -> ')} expectedTail=${JSON.stringify(expected.slice(-3))} actualTail=${JSON.stringify(seen.slice(-3))}`);
@@ -391,7 +390,6 @@ test("insertMany, write-through entity assignment, and bulk SQL delete remain or
     drain(db);
     expect(seen).toEqual([
       { op: "insert", table: "notes", id: a!.id },
-      { op: "insert", table: "notes", id: b!.id },
       { op: "update", table: "notes", id: a!.id },
       { op: "delete", table: "notes", id: b!.id },
     ]);
